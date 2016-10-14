@@ -1,12 +1,16 @@
 # Installation
+
+Works for Python 3 only.
+
 ## Windows
 ```
 pip install bcrypt
 ```
 ## Linux
-Download tar.gz: https://pypi.python.org/pypi/bcrypt/2.0.0
+Download tar.gz: https://pypi.python.org/pypi/bcrypt/3.1.0
+
 Extract and go to bcrypt's directory.
 ```
-python setup.py build
-python setup.py install
+python3 setup.py build
+python3 setup.py install
 ```
