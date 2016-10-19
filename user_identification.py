@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import shutil
 import grp, pwd
 import bcrypt
 import getpass
@@ -14,9 +15,13 @@ from Crypto.Cipher import *
 from Crypto.PublicKey import RSA
 from Crypto.Hash import HMAC
 
+# TODO: - Add login time limit (See python-crontab? https://pypi.python.org/pypi/python-crontab)
+#       - Should files all be in one directory and when a user is
+#         logged in, each file in it's current directory is just a
+#         symlink?
+
 # NOTE: How this is going to work:
-#       - Create a user/group for the program
-#       - Remove all rights for other users on the files
+#       - Each file is hidden (has a leading dot)
 #       - Each user has a private key (derived from login and password)
 #         and a public key (generated on creation from private key, stored with other user information, encrypted)
 #       - When a user tries to connect:
@@ -24,10 +29,12 @@ from Crypto.Hash import HMAC
 #         - Store plain public key in an hidden (for what it's worth...) file
 #         - Use private key (currently public key is used) to try to decrypt every file
 #         - If it works and there are not dummy files
-#         - Set rights to read for all
+#         - Remove leading dot. TODO?: Instead, create symlink to file
+#           => allow putting all files in a directory and using the
+#           program anywhere on the system.
 #         - ...
-#         - When user is done, use public key to rencrypt each file
-#         - Remove right to read to all except the program.
+#         - (TODO) When user is done, use public key to rencrypt each file
+#         - Add leading dot.
 # Advantages:
 #  - Can make dummy files
 #  - Can encrypt filenames
@@ -42,6 +49,11 @@ YAPM_USER_NAME = "yapm"
 YAPM_DUMMY_CHECK = "__dummy:"
 YAPM_DIRECTORY = os.path.join(os.path.expanduser("~"), ".yapm")
 YAPM_USER_DB = os.path.join(YAPM_DIRECTORY, ".users")
+
+# NOTE: cookie stores the following: (everything is accessible via get_info_current_user())
+#       - Connexion date encrypted by the user's private key.
+#       - Current directory on connexion encrypted by the user's private key.
+#       - User's public key.
 YAPM_CURRENT_USER_COOKIE = os.path.join(YAPM_DIRECTORY, ".user_cookie")
 
 if (os.name != "nt") and (os.name != "posix"):
@@ -135,10 +147,15 @@ def user_already_registered(login, password):
     
     return False, None
 
+# TODO: Allow empty logins/passwords?
 def prompt_user(login = None):
     if (login is None):
         login = input("Login: ")
     password = getpass.getpass()
+
+    if ((len(login) == 0) or
+        (len(password) == 0)):
+        return False, None, None, None
 
     valid, enc = user_already_registered(login, password)
     return valid, enc, login, password
@@ -148,6 +165,10 @@ def prompt_create_new_user(login = None):
     
     if (already_registered):
         print("User already registered.")
+        return False
+    
+    if (login == None):
+        print("Invalid indentifiers")
         return False
 
     database = get_user_db("ab")
@@ -174,37 +195,71 @@ def generate_user_rsa(login, password):
 
     return RSA.generate(1024, rng)
 
-def is_dummy(filename, public_key):
+
+def get_file_dummy_check(filename):
     try:
         with open(filename, "r") as enc_file:
             first_line = enc_file.readline()[:-1]
-            
-            # FIXME: Find a better check than path + const. Could be
-            # easily found by an outsider, knowing the public_key
-            # (which is the point).
-            # Btw, as the full path is used, the files can not be moved directly by the user.
-            # Is that a good or a bad point, I dunno.
-            check = filename + YAPM_DUMMY_CHECK
-            enc_dummy_check = public_encrypt(public_key, check + "0")
-
-            if (first_line == enc_dummy_check):
-                return False
-            
-        return True
+        return first_line
     except:
-        return True
+        return None
+
+def check_dummy_check(name_test, ref, public_key):
+    # FIXME: Find a better check than filename + const. Could be
+    # easily found by an outsider, knowing the public_key
+    # (which is the point).
+    check = name_test + YAPM_DUMMY_CHECK
+    enc_dummy_check = public_encrypt(public_key, check + "0")
+        
+    if (enc_dummy_check == ref):
+        return name_test
+    
+def is_displayed_file_mine(filename, public_key):
+    dummy_check = get_file_dummy_check(filename)
+
+    if (dummy_check is None):
+        return False
+
+    return check_dummy_check(filename, dummy_check, public_key)
+
+# TODO: Currently, filename is check as is then decrypted if no
+#       corresponding category is found.  Should we just check
+#       according to user's preferences?
+def get_category(filename, private_key):
+    category = filename
+            
+    if (category.startswith(".")):
+        category = filename[1:]
+                
+    dummy_check = get_file_dummy_check(filename)
+
+    if (dummy_check is None):
+        return None
+
+    # NOTE: First check if filename as is.
+    if (check_dummy_check(category, dummy_check, private_key.publickey())):
+        return category
+
+    # NOTE: Finally, check decrypted filename.
+    category = private_decrypt(private_key, category)
+
+    if (category is None):
+        return None
+    
+    if (check_dummy_check(category, dummy_check, private_key.publickey())):
+        return category
+    
+    return None
 
 def display_non_dummy_files(private_key):
-    print("Displaying non dummy files:")
     for root, dirs, files in os.walk(os.getcwd()):
         for f in files:
-            f_path = os.path.join(root, f)
-
-            # TODO: f_path may be encrypted, need to decrypt with
-            # private key first in that case .
-            if (not(is_dummy(f_path, private_key.publickey()))):
-                # TODO: Set others privilegies to read-only.
-                print(f)
+            category = get_category(f, private_key)
+            
+            if (category != None):
+                file_path = os.path.join(root, f)
+                shutil.move(file_path, category)
+                
 
 def connect_as_user(login = None):
     valid_user, enc, login, password = prompt_user(login)
@@ -212,47 +267,108 @@ def connect_as_user(login = None):
     if (valid_user):
         key = generate_user_rsa(login, password)
         display_non_dummy_files(key)
-        
+
         cookie = get_yapm_file(YAPM_CURRENT_USER_COOKIE, "wb+")
+        
+        enc_current_time = private_encrypt(key, str(time.time()))
+        enc_current_dir = private_encrypt(key, os.getcwd())
+        
+        cookie.write((enc_current_time + "\n").encode())
+        cookie.write((enc_current_dir + "\n").encode())
+        
         cookie.write(key.publickey().exportKey())
+        
         cookie.close()
         
         return True
 
     return False
 
-def get_public_key_current_user():
+def get_info_current_user():
+    enc_date = None
+    enc_dir = None
+    public_key = None
+    
     try:
-        cookie = get_yapm_file(YAPM_CURRENT_USER_COOKIE, "rb")
+        with open(YAPM_CURRENT_USER_COOKIE, "rb") as cookie:
+            enc_date = cookie.readline()
+            enc_dir = cookie.readline()
+            
+            key = b""
+            for l in cookie:
+                key += l
 
-        key = b""
-        for l in cookie:
-            key += l
-    
-        return RSA.importKey(key)
+        public_key = RSA.importKey(key)
+
+        return public_decrypt(public_key, enc_date), public_decrypt(public_key, enc_dir), public_key
     except:
-        return None
-    
+        return None, None, None
 
+def get_date_current_user():
+    date, directory, key = get_info_current_user()
+
+    return date
+
+def get_directory_current_user():
+    date, directory, key = get_info_current_user()
+
+    return directory
+
+def get_public_key_current_user():
+    date, directory, key = get_info_current_user()
+
+    return key
+
+
+# NOTE: m must be a string.
+#       Return an hexadecimal string.
 def public_encrypt(public_key, m, encoding = "utf-8", byteorder = "little"):
     return hex(public_key.encrypt(int.from_bytes(m.encode(encoding), byteorder=byteorder), 'x')[0])
 
+# NOTE: enc_m must be an hexadecimal string.
+#       Return a string.
+#       Return None if enc_m can not be decrypted.
 def private_decrypt(private_key, enc_m, enc_m_len = None, encoding = "utf-8", byteorder = "little"):
-    if (enc_m_len is None):
-        enc_m_len = math.ceil(math.log(enc_m, 2) / 8)
+    try:
+        enc_m = int(enc_m, 16)
+
+        if (enc_m_len is None):
+            enc_m_len = math.ceil(math.log(enc_m, 2) / 8)
         
-    return key.decrypt(enc_m).to_bytes(enc_m_len, byteorder=byteorder).decode(encoding)
+        return private_key.decrypt(enc_m).to_bytes(enc_m_len, byteorder=byteorder).decode(encoding).replace('\0', '')
+    except:
+        return None
 
-def hide_user_files(public_key):
-    print("Hiding non dummy files:")
-    for root, dirs, files in os.walk(os.getcwd()):
+# NOTE: m must be a string.
+#       Return an hexadecimal string.
+def private_encrypt(private_key, m, encoding = "utf-8", byteorder = "little"):
+    return hex(private_key.decrypt(int.from_bytes(m.encode(encoding), byteorder=byteorder)))
+
+# NOTE: enc_m must be an hexadecimal string.
+#       Return a string.
+#       Return None if enc_m can not be decrypted.
+def public_decrypt(public_key, enc_m, enc_m_len = None, encoding = "utf-8", byteorder = "little"):
+    try:
+        enc_m = int(enc_m, 16)
+
+        if (enc_m_len is None):
+            enc_m_len = math.ceil(math.log(enc_m, 2) / 8)
+
+        return public_key.encrypt(enc_m, 'x')[0].to_bytes(enc_m_len, byteorder=byteorder).decode(encoding).replace('\0', '')
+    except:
+        return None
+
+def hide_user_files(public_key, directory):
+    for root, dirs, files in os.walk(directory):
         for f in files:
-            f_path = os.path.join(root, f)
+            # f_path = os.path.join(root, f)
+            
+            if (is_displayed_file_mine(f, public_key)):
+                # TODO: f may need to be encrypted (with public_key).
+                category_path = os.path.join(root, f)
+                encrypted_filename_path = os.path.join(root, "." + f)
 
-            # TODO: f_path may need to be encrypted (with public_key).
-            if (not(is_dummy(f_path, public_key))):
-                # TODO: Remove others privilegies (only keep rw for the program). 
-                print(f)
+                shutil.move(category_path, encrypted_filename_path)
 
 def revive_current_user_if_needed():
     public_key = get_public_key_current_user()
@@ -268,11 +384,14 @@ def revive_current_user_if_needed():
                 
 def disconnect_current_user():
     # public_key = revive_current_user_if_needed()
-    public_key = get_public_key_current_user()
-
+    date, directory, public_key = get_info_current_user()
+    
     if (not(public_key is None)):
-        hide_user_files(public_key)
-    os.remove(YAPM_CURRENT_USER_COOKIE)
+        if (directory is None):
+            directory = os.getcwd()
+            
+        hide_user_files(public_key, directory)
+        os.remove(YAPM_CURRENT_USER_COOKIE)
 
 class PRNG(object):
     def __init__(self, seed):
@@ -306,10 +425,7 @@ if __name__ == "__main__":
     
     if (not(args.new_user is None)):
         new_user = args.new_user[0]
-        if (len(new_user[0]) == 0):
-            print("Invalid user name.")
-            quit()
-
+        
         prompt_create_new_user(new_user)
         quit()
         
@@ -321,7 +437,7 @@ if __name__ == "__main__":
             quit()
 
     public_key = revive_current_user_if_needed()
-    
+
     ## TODO: Uncomment below when user/group is done.
     # all_users = [p.pw_name for p in pwd.getpwall()]
     
@@ -341,7 +457,6 @@ if __name__ == "__main__":
     # all_files = ["toto", "tata"]
 
     # for f in all_files:
-    #     f = os.getcwd() + "/" + f
     #     with open(f, "w+") as toto:
     #         is_dummy = str(random.getrandbits(1))
     #         dummy_file = f + "__dummy:" + is_dummy
