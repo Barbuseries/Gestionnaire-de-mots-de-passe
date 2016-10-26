@@ -11,6 +11,7 @@ import time
 import random
 import math
 import subprocess
+import datetime
 from struct import pack
 from Crypto.Cipher import *
 from Crypto.PublicKey import RSA
@@ -54,10 +55,14 @@ YAPM_USER_DB = os.path.join(YAPM_DIRECTORY, ".users")
 YAPM_FILE_DB = os.path.join(YAPM_DIRECTORY, ".db")
 
 # NOTE: cookie stores the following: (everything is accessible via get_info_current_user())
+#       - User's login.
 #       - Connexion date encrypted by the user's private key.
+#       - Deconnexion date encrypted by the user's private key. (same as above if there is no time limit)
 #       - Current directory on connexion encrypted by the user's private key.
 #       - User's public key.
 YAPM_CURRENT_USER_COOKIE = os.path.join(YAPM_DIRECTORY, ".user_cookie")
+
+GET_PID_BACKGROUND_SESSION_CHECK_CMD = "ps aux | grep -E -e 'sleep .* user_identification.py -k' | grep -v 'grep' | awk '{print $2}'"
 
 def check_platform(plats, message = "This platform is currently not supported!"):
     if (os.name not in plats):
@@ -65,7 +70,10 @@ def check_platform(plats, message = "This platform is currently not supported!")
             print(message)
         return False
     return True
-    
+
+def get_pid_background_session_check():
+    return subprocess.check_output(GET_PID_BACKGROUND_SESSION_CHECK_CMD, shell=True)[:-1].decode()
+
 # NOTE: pad wth '#' until length of m is a multiple of s.
 # If r, pad right, else, pad left.
 def pad(m, s, r = True):
@@ -270,7 +278,7 @@ def display_non_dummy_files(private_key):
                 # shutil.move(file_path, category)
                 
 
-def connect_as_user(login = None):
+def connect_as_user(login = None, time_limit = 0):
     valid_user, enc, login, password = prompt_user(login)
     
     if (valid_user):
@@ -278,29 +286,44 @@ def connect_as_user(login = None):
         display_non_dummy_files(key)
 
         cookie = get_yapm_file(YAPM_CURRENT_USER_COOKIE, "wb+")
-        
-        enc_current_time = private_encrypt(key, str(time.time()))
+
+        current_time = time.time()
+        enc_login = private_encrypt(key, login)
+        enc_current_time = private_encrypt(key, str(current_time))
+        enc_disconnect_time = private_encrypt(key, str(current_time + time_limit))
         enc_current_dir = private_encrypt(key, os.getcwd())
-        
+
+        cookie.write((enc_login + "\n").encode())
         cookie.write((enc_current_time + "\n").encode())
+        cookie.write((enc_disconnect_time + "\n").encode())
         cookie.write((enc_current_dir + "\n").encode())
         
         cookie.write(key.publickey().exportKey())
         
         cookie.close()
+
+        if (time_limit > 0):
+            success_background_check = os.system("nohup sh -c 'sleep " + str(time_limit) + " && python3 user_identification.py -k' 2>/dev/null 1>/dev/null &")
+            
+            if (success_background_check != 0):
+                print("Failed to start background session check.\nYou will not be disconnected automatically.")
         
         return True
 
     return False
 
 def get_info_current_user():
-    enc_date = None
+    enc_login = None
+    enc_start_date = None
+    enc_end_date = None
     enc_dir = None
     public_key = None
     
     try:
         with open(YAPM_CURRENT_USER_COOKIE, "rb") as cookie:
-            enc_date = cookie.readline()
+            enc_login = cookie.readline()
+            enc_start_date = cookie.readline()
+            enc_end_date = cookie.readline()
             enc_dir = cookie.readline()
             
             key = b""
@@ -309,25 +332,73 @@ def get_info_current_user():
 
         public_key = RSA.importKey(key)
 
-        return public_decrypt(public_key, enc_date), public_decrypt(public_key, enc_dir), public_key
+        login = public_decrypt(public_key, enc_login)
+        start_date = float(public_decrypt(public_key, enc_start_date))
+        end_date = float(public_decrypt(public_key, enc_end_date))
+
+        directory = public_decrypt(public_key, enc_dir)
+        
+        if (start_date != end_date):
+            if (time.time() >= end_date):
+                disconnect_user(start_date, end_date, directory, public_key)
+                return None, None, None, None, None
+
+            pid = get_pid_background_session_check()
+        
+            if (len(pid) == 0):
+                print("WARNING:")
+                print("A background process (to check your session) has been killed suspiciously (i.e: not by me).")
+                print("If it's not your doing, make sure to disconnect manually.")
+                print("Otherwhise, files you own will still be visible")
+                print("until you run this program again (once the timer has run out).")
+                print("")
+        
+        return login, start_date, end_date, directory, public_key
     except:
-        return None, None, None
+        return None, None, None, None, None
 
-def get_date_current_user():
-    date, directory, key = get_info_current_user()
+def get_start_date_current_user():
+    login, start_date, end_date, directory, key = get_info_current_user()
 
-    return date
+    return start_date
+
+def get_end_date_current_user():
+    login, start_date, end_date, directory, key = get_info_current_user()
+
+    return end_date
 
 def get_directory_current_user():
-    date, directory, key = get_info_current_user()
+    login, start_date, end_date, directory, key = get_info_current_user()
 
     return directory
 
 def get_public_key_current_user():
-    date, directory, key = get_info_current_user()
+    login, start_date, end_date, directory, key = get_info_current_user()
 
     return key
 
+# TODO: Display all owned files.
+def dump_user_info():
+    login, start_date, end_date, directory, key = get_info_current_user()
+
+    if (key is None):
+        print("No user is logged in.")
+        return
+
+    print("Login: " + login)
+    print("")
+    print("Connected at: " + datetime.datetime.fromtimestamp(start_date).strftime('%H:%M:%S %Y-%m-%d'))
+    
+    if (start_date != end_date):
+        print("Connected until: " + datetime.datetime.fromtimestamp(end_date).strftime('%H:%M:%S %Y-%m-%d'))
+        print(str(math.floor(end_date - time.time())) + " seconds left")
+
+    print("")
+    print("Directory: " + directory)
+    print("")
+    print("Public key:\n" + key.exportKey().decode())
+    
+    
 # NOTE: m must be a string.
 #       Return an hexadecimal string.
 def public_encrypt(public_key, m, encoding = "utf-8", byteorder = "little"):
@@ -381,22 +452,19 @@ def hide_user_files(public_key, directory):
                 except:
                     print("Could not remove " + category_path)
 
-def revive_current_user_if_needed():
+def revive_current_user_if_needed(time_limit = 0):
     public_key = get_public_key_current_user()
     
     if (public_key is None):
         # TODO: Check if any file is still visible or find a way
         # to know if files still need to be hidden (file database, ...).
-        if (not(connect_as_user())):
+        if (not(connect_as_user(None, time_limit))):
             print("Access denied.")
             quit()
 
     return public_key
-                
-def disconnect_current_user():
-    # public_key = revive_current_user_if_needed()
-    date, directory, public_key = get_info_current_user()
-    
+
+def disconnect_user(start_date, end_date, directory, public_key):
     if (not(public_key is None)):
         # TODO: Notify user and ask him to indicate the directory?
         if (directory is None):
@@ -405,13 +473,20 @@ def disconnect_current_user():
         hide_user_files(public_key, directory)
         os.remove(YAPM_CURRENT_USER_COOKIE)
 
-        try:
-            # NOTE: If a connexion time was specified, remove it.
-            pid = subprocess.check_output("ps aux | grep -E -e 'sleep .* user_identification.py -k' | grep -v 'grep' | awk '{print $2}'", shell=True)[:-1].decode()
+        if (start_date != end_date):
+            try:
+                # NOTE: If a connexion time was specified, remove it.
+                pid = get_pid_background_session_check()
             
-            os.system("kill " + pid + " 2>/dev/null 1>/dev/null")
-        except:
-            pass
+                os.system("kill " + pid + " 2>/dev/null 1>/dev/null")
+            except:
+                pass
+
+def disconnect_current_user():
+    # public_key = revive_current_user_if_needed()
+    login, start_date, end_date, directory, public_key = get_info_current_user()
+    
+    disconnect_user(start_date, end_date, directory, public_key)
         
 
 class PRNG(object):
@@ -438,7 +513,10 @@ if __name__ == "__main__":
     parser.add_argument("-u", "--user", metavar="USER", dest="user", type=str, nargs=1,
                         help="Connect as user and exit.")
     parser.add_argument("-t", "--time", metavar="TIME", dest="time", type=int, nargs=1,
-                        help="Stay logged in for TIME seconds.")
+                        help="Connect, indicate to stay logged in for TIME seconds and exit. (TIME >= 0, default 0 (no limit))")
+    parser.add_argument("--dump-user-info", dest="dump_user_info", action="store_const",
+                        const=True,
+                        help='Display all user-related information and exit.')
     parser.add_argument("-k", "--stop-session", dest="disconnect", action="store_const",
                         const=True,
                         help='Stop current user session and exit.')
@@ -454,19 +532,31 @@ if __name__ == "__main__":
         
         prompt_create_new_user(new_user)
         quit()
-        
+
+    time_limit = 0
+
+    if (not(args.time is None)):
+        if (check_platform(["posix"], "ignored: -t|--time: only supported on linux.")):
+            time_limit = args.time[0]
+
+            if (time_limit < 0):
+                print("error: -t|--time: TIME must be positive.")
+                quit()
+            disconnect_current_user()
+
+    
     if (not(args.user is None)):
         disconnect_current_user()
 
-        if (not(connect_as_user(args.user[0]))):
+        if (not(connect_as_user(args.user[0], time_limit))):
             print("Access denied.")
             quit()
 
-    public_key = revive_current_user_if_needed()
+    if (args.dump_user_info):
+        dump_user_info()
+        quit()
 
-    if (not(args.time is None)):
-        if (check_platform(["posix"], "-t|--time: ignored, only supported on linux.")):
-            os.system("nohup sh -c 'sleep " + str(args.time[0]) + " && python3 user_identification.py -k' 2>/dev/null 1>/dev/null &")
+    public_key = revive_current_user_if_needed(time_limit)
     
     ## Generate (non-)dummy files.
     # login = "login"
