@@ -10,15 +10,17 @@ import argparse
 import time
 import random
 import math
+import subprocess
 from struct import pack
 from Crypto.Cipher import *
 from Crypto.PublicKey import RSA
 from Crypto.Hash import HMAC
 
-# TODO: - Add login time limit (See python-crontab? https://pypi.python.org/pypi/python-crontab)
-#       - Should files all be in one directory and when a user is
-#         logged in, each file in it's current directory is just a
-#         symlink?
+# TODO: - Only allow to specify login time when user logs in...
+#       - Put everything that can be reused for file encryption in another file and import.
+
+# DONE (but still needing thoughts):
+#       - Login time limit (anybody can just kill the process by it's PID)
 
 # NOTE: How this is going to work:
 #       - Each file is hidden (has a leading dot)
@@ -29,7 +31,7 @@ from Crypto.Hash import HMAC
 #         - Store plain public key in an hidden (for what it's worth...) file
 #         - Use private key (currently public key is used) to try to decrypt every file
 #         - If it works and there are not dummy files
-#         - Remove leading dot. TODO?: Instead, create symlink to file
+#         - Remove leading dot. DONE?: Instead, create symlink to file
 #           => allow putting all files in a directory and using the
 #           program anywhere on the system.
 #         - ...
@@ -49,6 +51,7 @@ YAPM_USER_NAME = "yapm"
 YAPM_DUMMY_CHECK = "__dummy:"
 YAPM_DIRECTORY = os.path.join(os.path.expanduser("~"), ".yapm")
 YAPM_USER_DB = os.path.join(YAPM_DIRECTORY, ".users")
+YAPM_FILE_DB = os.path.join(YAPM_DIRECTORY, ".db")
 
 # NOTE: cookie stores the following: (everything is accessible via get_info_current_user())
 #       - Connexion date encrypted by the user's private key.
@@ -56,10 +59,13 @@ YAPM_USER_DB = os.path.join(YAPM_DIRECTORY, ".users")
 #       - User's public key.
 YAPM_CURRENT_USER_COOKIE = os.path.join(YAPM_DIRECTORY, ".user_cookie")
 
-if (os.name != "nt") and (os.name != "posix"):
-    print("This platform is not currently supported!")
-    quit()
-
+def check_platform(plats, message = "This platform is currently not supported!"):
+    if (os.name not in plats):
+        if (not(message is None)):
+            print(message)
+        return False
+    return True
+    
 # NOTE: pad wth '#' until length of m is a multiple of s.
 # If r, pad right, else, pad left.
 def pad(m, s, r = True):
@@ -196,9 +202,11 @@ def generate_user_rsa(login, password):
     return RSA.generate(1024, rng)
 
 
-def get_file_dummy_check(filename):
+def get_file_dummy_check(filename, directory = "."):
     try:
-        with open(filename, "r") as enc_file:
+        file_path = os.path.join(directory, filename)
+        
+        with open(file_path, "r") as enc_file:
             first_line = enc_file.readline()[:-1]
         return first_line
     except:
@@ -231,7 +239,7 @@ def get_category(filename, private_key):
     if (category.startswith(".")):
         category = filename[1:]
                 
-    dummy_check = get_file_dummy_check(filename)
+    dummy_check = get_file_dummy_check(filename, YAPM_FILE_DB)
 
     if (dummy_check is None):
         return None
@@ -252,13 +260,14 @@ def get_category(filename, private_key):
     return None
 
 def display_non_dummy_files(private_key):
-    for root, dirs, files in os.walk(os.getcwd()):
+    for root, dirs, files in os.walk(YAPM_FILE_DB):
         for f in files:
             category = get_category(f, private_key)
             
             if (category != None):
                 file_path = os.path.join(root, f)
-                shutil.move(file_path, category)
+                os.system("ln -s " + file_path + " " + category)
+                # shutil.move(file_path, category)
                 
 
 def connect_as_user(login = None):
@@ -319,7 +328,6 @@ def get_public_key_current_user():
 
     return key
 
-
 # NOTE: m must be a string.
 #       Return an hexadecimal string.
 def public_encrypt(public_key, m, encoding = "utf-8", byteorder = "little"):
@@ -367,8 +375,11 @@ def hide_user_files(public_key, directory):
                 # TODO: f may need to be encrypted (with public_key).
                 category_path = os.path.join(root, f)
                 encrypted_filename_path = os.path.join(root, "." + f)
-
-                shutil.move(category_path, encrypted_filename_path)
+                try:
+                    os.remove(category_path)
+                    # shutil.move(category_path, encrypted_filename_path)
+                except:
+                    print("Could not remove " + category_path)
 
 def revive_current_user_if_needed():
     public_key = get_public_key_current_user()
@@ -387,11 +398,21 @@ def disconnect_current_user():
     date, directory, public_key = get_info_current_user()
     
     if (not(public_key is None)):
+        # TODO: Notify user and ask him to indicate the directory?
         if (directory is None):
             directory = os.getcwd()
             
         hide_user_files(public_key, directory)
         os.remove(YAPM_CURRENT_USER_COOKIE)
+
+        try:
+            # NOTE: If a connexion time was specified, remove it.
+            pid = subprocess.check_output("ps aux | grep -E -e 'sleep .* user_identification.py -k' | grep -v 'grep' | awk '{print $2}'", shell=True)[:-1].decode()
+            
+            os.system("kill " + pid + " 2>/dev/null 1>/dev/null")
+        except:
+            pass
+        
 
 class PRNG(object):
     def __init__(self, seed):
@@ -408,11 +429,16 @@ class PRNG(object):
         return result
     
 if __name__ == "__main__":
+    if (not(check_platform(["nt", "posix"]))):
+        quit()
+    
     parser = argparse.ArgumentParser(description="User authentification parser.")
     parser.add_argument("--add-user", metavar="USER", dest="new_user", type=str, nargs=1,
                         help="Add a new user and exit.")
     parser.add_argument("-u", "--user", metavar="USER", dest="user", type=str, nargs=1,
                         help="Connect as user and exit.")
+    parser.add_argument("-t", "--time", metavar="TIME", dest="time", type=int, nargs=1,
+                        help="Stay logged in for TIME seconds.")
     parser.add_argument("-k", "--stop-session", dest="disconnect", action="store_const",
                         const=True,
                         help='Stop current user session and exit.')
@@ -438,13 +464,9 @@ if __name__ == "__main__":
 
     public_key = revive_current_user_if_needed()
 
-    ## TODO: Uncomment below when user/group is done.
-    # all_users = [p.pw_name for p in pwd.getpwall()]
-    
-    # if (not(YAPM_USER_NAME) in all_users):
-    #     print("Yapm user needs to be present.")
-    #     quit()
-
+    if (not(args.time is None)):
+        if (check_platform(["posix"], "-t|--time: ignored, only supported on linux.")):
+            os.system("nohup sh -c 'sleep " + str(args.time[0]) + " && python3 user_identification.py -k' 2>/dev/null 1>/dev/null &")
     
     ## Generate (non-)dummy files.
     # login = "login"
@@ -457,7 +479,7 @@ if __name__ == "__main__":
     # all_files = ["toto", "tata"]
 
     # for f in all_files:
-    #     with open(f, "w+") as toto:
+    #     with open(os.path.join(YAPM_FILE_DB, f), "w+") as toto:
     #         is_dummy = str(random.getrandbits(1))
     #         dummy_file = f + "__dummy:" + is_dummy
     #         print(dummy_file)
