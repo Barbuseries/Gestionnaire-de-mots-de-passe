@@ -3,9 +3,8 @@
 Works for Python 3 only.
 
 ## Windows
-```
-pip install bcrypt
-```
+Currently not supported.
+
 ## Linux
 Download tar.gz: https://pypi.python.org/pypi/bcrypt/3.1.0
 

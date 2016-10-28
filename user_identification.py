@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import shutil
 import grp, pwd
 import bcrypt
@@ -12,16 +13,17 @@ import random
 import math
 import subprocess
 import datetime
+import base64
 from struct import pack
 from Crypto.Cipher import *
 from Crypto.PublicKey import RSA
 from Crypto.Hash import HMAC
 
-# TODO: - Only allow to specify login time when user logs in...
+# TODO:
 #       - Put everything that can be reused for file encryption in another file and import.
 
 # DONE (but still needing thoughts):
-#       - Login time limit (anybody can just kill the process by it's PID)
+#       - Everything relies on the integrity of ~/.yapm/.user_cookie
 
 # NOTE: How this is going to work:
 #       - Each file is hidden (has a leading dot)
@@ -32,7 +34,7 @@ from Crypto.Hash import HMAC
 #         - Store plain public key in an hidden (for what it's worth...) file
 #         - Use private key (currently public key is used) to try to decrypt every file
 #         - If it works and there are not dummy files
-#         - Remove leading dot. DONE?: Instead, create symlink to file
+#         - Create symlink to file
 #           => allow putting all files in a directory and using the
 #           program anywhere on the system.
 #         - ...
@@ -57,19 +59,60 @@ YAPM_FILE_DB = os.path.join(YAPM_DIRECTORY, ".db")
 # NOTE: cookie stores the following: (everything is accessible via get_info_current_user())
 #       - User's login.
 #       - Connexion date encrypted by the user's private key.
-#       - Deconnexion date encrypted by the user's private key. (same as above if there is no time limit)
+#       - Deconnexion date encrypted by the user's private key. (same
+#         as above if there is no time limit)
 #       - Current directory on connexion encrypted by the user's private key.
 #       - User's public key.
 YAPM_CURRENT_USER_COOKIE = os.path.join(YAPM_DIRECTORY, ".user_cookie")
 
+# TODO: It may be more secure to store the pid at the process
+# creation, in case someone has the idea to kill it and recreate one
+# with a sleep of 10000000...
+#       In that case, it may be better not to try to recreate it.
 GET_PID_BACKGROUND_SESSION_CHECK_CMD = "ps aux | grep -E -e 'sleep .* user_identification.py -k' | grep -v 'grep' | awk '{print $2}'"
+
+# FIXME: Temporary solution to have short enough filenames.
+#        See int_to_cust and cust_to_int.
+#        Current version returns a 169 chars string (max is 255).
+#        Just need a baseXX encoder.
+#        Other solution would be to use a hash. Dummy check would then be:
+#          - Read first line and extract filename.
+#          - Encrypt with public key and hash.
+#          - Test equality.
+#        Likewhise, finding file by category would be encrypt->hash =>
+#        check exists + check is dummy.
+FILENAME_VALID_CHARS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-[].'
+COUNT_FILENAME_VALID_CHARS = len(FILENAME_VALID_CHARS)
+
+def eprint(*args, **kwargs):    
+    if (kwargs.pop("prog_name", True)):
+        print("%s: %s" % (os.path.basename(sys.argv[0]), *args), file=sys.stderr, **kwargs)
+    else:
+        print(*args, file=sys.stderr, **kwargs)
 
 def check_platform(plats, message = "This platform is currently not supported!"):
     if (os.name not in plats):
         if (not(message is None)):
-            print(message)
+            eprint(message)
         return False
+    
     return True
+
+# FIXME: Replace this!
+def int_to_cust(i):
+    result = ''
+    while i:
+        result = FILENAME_VALID_CHARS[i % COUNT_FILENAME_VALID_CHARS] + result
+        i = i // COUNT_FILENAME_VALID_CHARS
+    if not result:
+        result = FILENAME_VALID_CHARS[0]
+    return result
+
+def cust_to_int(s):
+    result = 0
+    for char in s:
+        result = result * COUNT_FILENAME_VALID_CHARS + FILENAME_VALID_CHARS.find(char)
+    return result
 
 def get_pid_background_session_check():
     return subprocess.check_output(GET_PID_BACKGROUND_SESSION_CHECK_CMD, shell=True)[:-1].decode()
@@ -140,7 +183,7 @@ def user_already_registered(login, password):
     database = get_user_db("rb+")
 
     if (database is None):
-        print("Can not access database.")
+        eprint("Can not access database.")
         return False
 
     all_lines = database.readlines()
@@ -241,7 +284,7 @@ def is_displayed_file_mine(filename, public_key):
 # TODO: Currently, filename is check as is then decrypted if no
 #       corresponding category is found.  Should we just check
 #       according to user's preferences?
-def get_category(filename, private_key):
+def get_category_from_file(filename, private_key):
     category = filename
             
     if (category.startswith(".")):
@@ -257,6 +300,8 @@ def get_category(filename, private_key):
         return category
 
     # NOTE: Finally, check decrypted filename.
+    # FIXME: See int_to_cust and cust_to_int.
+    category = hex(cust_to_int(category))
     category = private_decrypt(private_key, category)
 
     if (category is None):
@@ -270,13 +315,12 @@ def get_category(filename, private_key):
 def display_non_dummy_files(private_key):
     for root, dirs, files in os.walk(YAPM_FILE_DB):
         for f in files:
-            category = get_category(f, private_key)
+            category = get_category_from_file(f, private_key)
             
             if (category != None):
                 file_path = os.path.join(root, f)
                 os.system("ln -s " + file_path + " " + category)
                 # shutil.move(file_path, category)
-                
 
 def connect_as_user(login = None, time_limit = 0):
     valid_user, enc, login, password = prompt_user(login)
@@ -306,7 +350,7 @@ def connect_as_user(login = None, time_limit = 0):
             success_background_check = os.system("nohup sh -c 'sleep " + str(time_limit) + " && python3 user_identification.py -k' 2>/dev/null 1>/dev/null &")
             
             if (success_background_check != 0):
-                print("Failed to start background session check.\nYou will not be disconnected automatically.")
+                eprint("Failed to start background session check.\nYou will not be disconnected automatically.")
         
         return True
 
@@ -344,7 +388,7 @@ def get_info_current_user():
                 return None, None, None, None, None
 
             pid = get_pid_background_session_check()
-        
+
             if (len(pid) == 0):
                 print("WARNING:")
                 print("A background process (to check your session) has been killed suspiciously (i.e: not by me).")
@@ -377,7 +421,21 @@ def get_public_key_current_user():
 
     return key
 
-# TODO: Display all owned files.
+# TODO: Instead of multiple dump functions, just use one with multiple
+# flags.
+def dump_user_categories(key = None, directory = None):
+    if (key is None):
+        login, start_date, end_date, directory, key = get_info_current_user()
+
+    if (key is None):
+        print("No user is logged in.")
+        return
+
+    user_categories = get_user_categories(key, directory)
+    
+    for category in user_categories:
+        print(category)
+
 def dump_user_info():
     login, start_date, end_date, directory, key = get_info_current_user()
 
@@ -395,6 +453,11 @@ def dump_user_info():
 
     print("")
     print("Directory: " + directory)
+    print("")
+    print("Categories:")
+    
+    dump_user_categories(key, directory)
+        
     print("")
     print("Public key:\n" + key.exportKey().decode())
     
@@ -438,19 +501,27 @@ def public_decrypt(public_key, enc_m, enc_m_len = None, encoding = "utf-8", byte
         return None
 
 def hide_user_files(public_key, directory):
+    user_categories = get_user_categories(public_key, directory, True)
+
+    for category in user_categories:
+        try:
+            os.remove(category)
+        except:
+            eprint("Failed to hide category '%s'." % os.path.basename(category))
+
+def get_user_categories(public_key, directory, full_path = False):
+    user_categories = []
+    
     for root, dirs, files in os.walk(directory):
         for f in files:
-            # f_path = os.path.join(root, f)
-            
             if (is_displayed_file_mine(f, public_key)):
-                # TODO: f may need to be encrypted (with public_key).
-                category_path = os.path.join(root, f)
-                encrypted_filename_path = os.path.join(root, "." + f)
-                try:
-                    os.remove(category_path)
-                    # shutil.move(category_path, encrypted_filename_path)
-                except:
-                    print("Could not remove " + category_path)
+                if (full_path):
+                    user_categories.append(os.path.join(root, f))
+                else:
+                    user_categories.append(f)
+                    
+    return user_categories
+                    
 
 def revive_current_user_if_needed(time_limit = 0):
     public_key = get_public_key_current_user()
@@ -475,7 +546,6 @@ def disconnect_user(start_date, end_date, directory, public_key):
 
         if (start_date != end_date):
             try:
-                # NOTE: If a connexion time was specified, remove it.
                 pid = get_pid_background_session_check()
             
                 os.system("kill " + pid + " 2>/dev/null 1>/dev/null")
@@ -502,76 +572,3 @@ class PRNG(object):
 
         result, self.buffer = self.buffer[:n], self.buffer[n:]
         return result
-    
-if __name__ == "__main__":
-    if (not(check_platform(["nt", "posix"]))):
-        quit()
-    
-    parser = argparse.ArgumentParser(description="User authentification parser.")
-    parser.add_argument("--add-user", metavar="USER", dest="new_user", type=str, nargs=1,
-                        help="Add a new user and exit.")
-    parser.add_argument("-u", "--user", metavar="USER", dest="user", type=str, nargs=1,
-                        help="Connect as user and exit.")
-    parser.add_argument("-t", "--time", metavar="TIME", dest="time", type=int, nargs=1,
-                        help="Connect, indicate to stay logged in for TIME seconds and exit. (TIME >= 0, default 0 (no limit))")
-    parser.add_argument("--dump-user-info", dest="dump_user_info", action="store_const",
-                        const=True,
-                        help='Display all user-related information and exit.')
-    parser.add_argument("-k", "--stop-session", dest="disconnect", action="store_const",
-                        const=True,
-                        help='Stop current user session and exit.')
-
-    args = parser.parse_args()
-
-    if (args.disconnect):
-        disconnect_current_user()
-        quit()
-    
-    if (not(args.new_user is None)):
-        new_user = args.new_user[0]
-        
-        prompt_create_new_user(new_user)
-        quit()
-
-    time_limit = 0
-
-    if (not(args.time is None)):
-        if (check_platform(["posix"], "ignored: -t|--time: only supported on linux.")):
-            time_limit = args.time[0]
-
-            if (time_limit < 0):
-                print("error: -t|--time: TIME must be positive.")
-                quit()
-            disconnect_current_user()
-
-    
-    if (not(args.user is None)):
-        disconnect_current_user()
-
-        if (not(connect_as_user(args.user[0], time_limit))):
-            print("Access denied.")
-            quit()
-
-    if (args.dump_user_info):
-        dump_user_info()
-        quit()
-
-    public_key = revive_current_user_if_needed(time_limit)
-    
-    ## Generate (non-)dummy files.
-    # login = "login"
-    # password = "toto"
-    
-    # key = generate_user_rsa(login, password)
-
-    # public_key = key.publickey()
-
-    # all_files = ["toto", "tata"]
-
-    # for f in all_files:
-    #     with open(os.path.join(YAPM_FILE_DB, f), "w+") as toto:
-    #         is_dummy = str(random.getrandbits(1))
-    #         dummy_file = f + "__dummy:" + is_dummy
-    #         print(dummy_file)
-    #         enc_mess = public_encrypt(public_key, dummy_file)
-    #         toto.write(enc_mess + "\n")
