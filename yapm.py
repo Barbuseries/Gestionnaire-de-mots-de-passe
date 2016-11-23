@@ -9,21 +9,24 @@ class CategoryStatus(Enum):
     exist = 1
     inaccessible = 2
 
-def get_file_from_category(name, public_key):
-    file_path = os.path.join(YAPM_FILE_DB, "." + name)
+def is_arg_set(arg):
+    return not(arg is None)
 
-    # TODO: Check if file is dummy.
-    #       If it is, allow rewrite.
-    if (os.path.exists(file_path)):
-        return file_path
+def confirm_password(test_pwd, input_text = "Confirm password:"):
+    confirm_pwd = getpass.getpass(input_text)
+    
+    if (confirm_pwd != test_pwd):
+        print("Passwords do not match.")
+        return False
+    
+    return True
 
-    enc_name = int_to_cust(int(public_encrypt(public_key, name), 16))
-    file_path = os.path.join(YAPM_FILE_DB, "." + enc_name)
+def enter_password_and_confirm(input_text = "Password:", confirm_input_text = "Confirm password:"):
+    test_pwd = getpass.getpass(input_text)
 
-    # TODO: Same as above.
-    if (os.path.exists(file_path)):
-        return file_path
-
+    if (confirm_password(test_pwd, confirm_input_text)):
+        return test_pwd
+    
     return None
     
 # FIXME: RSA encryption returns a filename way too long.
@@ -43,9 +46,8 @@ def create_category(name, public_key, encryt_filename = False):
         file_path = os.path.join(YAPM_FILE_DB, "." + final_name)
         
         with open(file_path, "w+") as category:
-            # TODO: Change check to just be name? (+ seed)
-            dummy_file = name + "__dummy:0"
-            enc_check = public_encrypt(public_key, dummy_file)
+            # TODO: Change check to juxst be name? (+ seed)            
+            enc_check = public_encrypt(public_key, generate_dummy_check(name))
             category.write(enc_check + "\n")
 
         os.system("ln -s " + file_path + " " + name)
@@ -85,22 +87,33 @@ if __name__ == "__main__":
     user_id_group.add_argument("--dump-user-info", dest="dump_user_info", action="store_const",
                         const=True,
                         help='Display all user-related information and exit.')
-    user_id_group.add_argument("--dump-categories", dest="dump_categories", action="store_const",
+    user_id_group.add_argument("--show-categories", dest="show_categories", action="store_const",
                         const=True,
                         help='Display all user\'s categories and exit.')
     user_id_group.add_argument("-k", "--stop-session", dest="disconnect", action="store_const",
                         const=True,
                         help='Stop current user session and exit.')
     
-    
-    category_modif_group = parser.add_argument_group("Category modification", "Options related to category modification.")
-    category_modif_group.add_argument("-n", "--new-category", metavar="CATEGORY", dest="new_categories", type=str, nargs='+',
-                                      help="Create CATEGORY if it does not already exist.")
-    category_modif_group.add_argument("-e", "--encrypt-filename", dest="encrypt_filename", action="store_const",
-                                      const=True,
-                                      help='Encrypt filename when creating category.')
-    category_modif_group.add_argument("-d", "--delete-category", metavar="CATEGORY", dest="delete_categories", type=str, nargs='+',
-                                      help="Delete CATEGORY if it exists.")
+    category_group = parser.add_argument_group("Categories", "Options related to categories.")
+    category_group.add_argument("-c", "--create-category", metavar="CATEGORY", dest="categories_to_create", type=str, nargs='+',
+                                help="Create CATEGORY if it does not already exist.")
+    category_group.add_argument("-e", "--encrypt-filename", dest="encrypt_filename", action="store_const",
+                                const=True,
+                                help='Encrypt filename when creating category.')
+    category_group.add_argument("-d", "--delete-category", metavar="CATEGORY", dest="categories_to_delete", type=str, nargs='+',
+                                help="Delete CATEGORY if it exists.")
+    category_group.add_argument('-w', '--show-category', metavar="CATEGORY", dest='categories_to_show', type=str, nargs='+',
+                                help='Display content of CATEGORY.')
+
+    # TODO: Add specification of category.
+    #       Or add a separate --category option. That may require some tweaks with the options above...
+    pairs_group = parser.add_argument_group("Pairs", "Options related to pairs.")
+    pairs_group.add_argument('-s', '--set-pair', dest='set_pairs', metavar='KEY:VALUE', type=str, nargs='+',
+                             help='Add a new KEY-VALUE pair in CATEGORY.')
+    pairs_group.add_argument('-g', '--get-value', dest='get_pairs', metavar='KEY', type=str, nargs='+',
+                             help='Get the VALUE from KEY.')
+    pairs_group.add_argument('-r', '--remove-pair', dest='remove_pairs', metavar='KEY', type=str, nargs='+',
+                             help='Remove the KEY-VALUE pair in CATEGORY.')
     
     args = parser.parse_args()
 
@@ -109,7 +122,7 @@ if __name__ == "__main__":
         disconnect_current_user()
         quit()
     
-    if (not(args.new_user is None)):
+    if (is_arg_set(args.new_user)):
         new_user = args.new_user[0]
         
         prompt_create_new_user(new_user)
@@ -117,7 +130,7 @@ if __name__ == "__main__":
 
     time_limit = 0
 
-    if (not(args.time is None)):
+    if (is_arg_set(args.time)):
         if (check_platform(["posix"], "ignored: -t|--time: only supported on linux.")):
             time_limit = args.time[0]
 
@@ -127,29 +140,30 @@ if __name__ == "__main__":
             disconnect_current_user()
 
     
-    if (not(args.user is None)):
+    if (is_arg_set(args.user)):
         disconnect_current_user()
 
         if (not(connect_as_user(args.user[0], time_limit))):
             print("Access denied.")
             quit()
 
+    public_key = revive_current_user_if_needed(time_limit)
+
     if (args.dump_user_info):
         dump_user_info()
         quit()
 
-    if (args.dump_categories):
+    if (args.show_categories):
         dump_user_categories()
         quit()
 
-    public_key = revive_current_user_if_needed(time_limit)
-
     # category_modif_group option checking    
-    if (not(args.new_categories is None)):
+    if (is_arg_set(args.categories_to_create)):
         encrypt_filename = False
         if (args.encrypt_filename):
             encrypt_filename = True
-        for category in args.new_categories:
+        for category in args.categories_to_create:
+            # TODO: Do not create category if password inputing fails.
             success, status = create_category(category, public_key, encrypt_filename)
             
             if (not(success)):
@@ -159,10 +173,14 @@ if __name__ == "__main__":
                     eprint("already exists.", prog_name=False)
                 else:
                     eprint("could not access database.", prog_name=False)
+            else:
+                category_pwd = enter_password_and_confirm(category + "'s password:")
 
+                if (category_pwd is None):
+                    delete_category(category, public_key)
 
-    if (not(args.delete_categories is None)):
-        for category in args.delete_categories:
+    if (is_arg_set(args.categories_to_delete)):
+        for category in args.categories_to_delete:
             success, status = delete_category(category, public_key)
             
             if (not(success)):
@@ -172,3 +190,44 @@ if __name__ == "__main__":
                     eprint("does not exist.", prog_name=False)
                 else:
                     eprint("could not access database.", prog_name=False)
+
+    if (is_arg_set(args.categories_to_show)):
+        for category in args.categories_to_show:
+            file_path = get_file_from_category(category, public_key)
+
+            if (file_path is None):
+                eprint("Failed to display category '%s: does not exist." % category)
+            else:
+                print("%s:" % category)
+                with open(file_path, "rb") as encrypted_file:
+                    # User ownership check.
+                    encrypted_file.readline()
+                    
+                    for line in encrypted_file:
+                        print(line)
+            
+
+    if (is_arg_set(args.set_pairs)):
+        kv = [i.split(":") for i in args.set_pairs]
+
+        index = 0
+        for i in kv:
+            while ((len(i) < 2) or (i[1] == "")):
+                i = [i, getpass.getpass(i[0] + ":")]
+
+            if (len(i) > 2):
+                eprint("Malformed KEY:VALUE pair '%s'." % ":".join(i))
+                del kv[index]
+            elif (i[0] == ""):
+                eprint("VALUE '%s' is missing a KEY." % i[1])
+                del kv[index]
+                
+            index += 1
+
+            
+
+    if (is_arg_set(args.get_pairs)):
+        pass
+
+    if (is_arg_set(args.remove_pairs)):
+        pass

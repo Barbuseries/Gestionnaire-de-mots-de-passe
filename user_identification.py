@@ -25,6 +25,23 @@ from Crypto.Hash import HMAC
 # DONE (but still needing thoughts):
 #       - Everything relies on the integrity of ~/.yapm/.user_cookie
 
+# NOTE: Login process:
+#       - Adding user:
+#           - Login prompt
+#           - Password prompt
+#           - If login in user database,
+#               - error
+#           - Otherwhise, add login:$salt$key_derived_password
+#       - Connecgting as user
+#           - Login prompt
+#           - Password prompt
+#           - If not login in database
+#               - error
+#           - Get salt and key_derived_password
+#           - If given password derived key + salt != key_derived_password + salt
+#               - error
+#           - Show user categories
+
 # NOTE: How this is going to work:
 #       - Each file is hidden (has a leading dot)
 #       - Each user has a private key (derived from login and password)
@@ -34,7 +51,7 @@ from Crypto.Hash import HMAC
 #         - Store plain public key in an hidden (for what it's worth...) file
 #         - Use private key (currently public key is used) to try to decrypt every file
 #         - If it works and there are not dummy files
-#         - Create symlink to file
+#         - Create file in current directory (filename is the category)
 #           => allow putting all files in a directory and using the
 #           program anywhere on the system.
 #         - ...
@@ -179,7 +196,7 @@ def password_key(password, salt = b'salt'):
                       desired_key_bytes = 32,
                       rounds=100)
         
-def user_already_registered(login, password):
+def user_already_registered(login):
     database = get_user_db("rb+")
 
     if (database is None):
@@ -189,16 +206,13 @@ def user_already_registered(login, password):
     all_lines = database.readlines()
 
     for line in all_lines:
-        line = line[:-1].split(b"$")
-        salt = b'salt'
-        b_rest_line = b''.join(line)
+        line = line[:-1].split(b":")
 
-        pwd_key = password_key(password, salt)
-        pwd_enc = AES.new(pwd_key)
-        decrypted_login = unpad(pwd_enc.decrypt(b_rest_line).decode(errors="ignore"))
+        if (len(line) != 2):
+            continue
 
-        if (login == decrypted_login):
-            return True, pwd_enc
+        if (line[0].decode() == login):
+            return True, line[1]
         
     database.close()
     
@@ -212,35 +226,41 @@ def prompt_user(login = None):
 
     if ((len(login) == 0) or
         (len(password) == 0)):
-        return False, None, None, None
+        return False, None, None
 
-    valid, enc = user_already_registered(login, password)
-    return valid, enc, login, password
+    registered, user_line = user_already_registered(login)
+
+    if (not(registered)):
+        return False, login, password
+
+    salt, pwd_key = user_line.split(b"$")[1:]
+
+    if (password_key(password, salt).hex().encode() == pwd_key):
+        return registered, login, password
+    
+    return registered, None, None
 
 def prompt_create_new_user(login = None):
-    already_registered, enc, login, password = prompt_user(login)
+    already_registered, login, password = prompt_user(login)
     
     if (already_registered):
         print("User already registered.")
         return False
     
     if (login == None):
-        print("Invalid indentifiers")
+        print("Invalid indentifiers.")
         return False
 
     database = get_user_db("ab")
     database.seek(0, os.SEEK_SET)
 
-    # TODO: Use real salt and save it somewhere.
-    salt = b'salt'
-    password_key(password, salt)
+    # TODO: Allow specification of salt's size.
+    salt = os.urandom(32).hex().encode()
+    pwd_key = password_key(password, salt).hex().encode()
 
-    pwd_key = password_key(password)
-    
-    pwd_enc = AES.new(pwd_key)
-    encrypted_login = pwd_enc.encrypt(pad(login, 16))
+    user_line = login.encode() + b":$" + salt + b"$" + pwd_key;
 
-    database.write(encrypted_login)
+    database.write(user_line)
     database.write(b'\n')
     database.close()
     
@@ -263,23 +283,30 @@ def get_file_dummy_check(filename, directory = "."):
     except:
         return None
 
+def generate_dummy_check(filename, is_dummy = False):
+    return filename + YAPM_DUMMY_CHECK + str(int(is_dummy))
+    
 def check_dummy_check(name_test, ref, public_key):
     # FIXME: Find a better check than filename + const. Could be
     # easily found by an outsider, knowing the public_key
     # (which is the point).
-    check = name_test + YAPM_DUMMY_CHECK
-    enc_dummy_check = public_encrypt(public_key, check + "0")
-        
+    enc_dummy_check = public_encrypt(public_key, generate_dummy_check(name_test))
+
     if (enc_dummy_check == ref):
         return name_test
     
-def is_displayed_file_mine(filename, public_key):
-    dummy_check = get_file_dummy_check(filename)
+def is_displayed_file_mine(possible_category, public_key):
+    category_file = get_file_from_category(possible_category, public_key);
+
+    if (category_file is None):
+        return False
+    
+    dummy_check = get_file_dummy_check(category_file)
 
     if (dummy_check is None):
         return False
 
-    return check_dummy_check(filename, dummy_check, public_key)
+    return check_dummy_check(possible_category, dummy_check, public_key)
 
 # TODO: Currently, filename is check as is then decrypted if no
 #       corresponding category is found.  Should we just check
@@ -312,6 +339,23 @@ def get_category_from_file(filename, private_key):
     
     return None
 
+def get_file_from_category(name, public_key):
+    file_path = os.path.join(YAPM_FILE_DB, "." + name)
+
+    # TODO: Check if file is dummy.
+    #       If it is, allow rewrite.
+    if (os.path.exists(file_path)):
+        return file_path
+
+    enc_name = int_to_cust(int(public_encrypt(public_key, name), 16))
+    file_path = os.path.join(YAPM_FILE_DB, "." + enc_name)
+
+    # TODO: Same as above.
+    if (os.path.exists(file_path)):
+        return file_path
+
+    return None
+
 def display_non_dummy_files(private_key):
     for root, dirs, files in os.walk(YAPM_FILE_DB):
         for f in files:
@@ -319,11 +363,11 @@ def display_non_dummy_files(private_key):
             
             if (category != None):
                 file_path = os.path.join(root, f)
-                os.system("ln -s " + file_path + " " + category)
+                open(category, "w+").close();
                 # shutil.move(file_path, category)
 
 def connect_as_user(login = None, time_limit = 0):
-    valid_user, enc, login, password = prompt_user(login)
+    valid_user, login, password = prompt_user(login)
     
     if (valid_user):
         key = generate_user_rsa(login, password)
@@ -422,7 +466,7 @@ def get_public_key_current_user():
     return key
 
 # TODO: Instead of multiple dump functions, just use one with multiple
-# flags.
+# flags. 
 def dump_user_categories(key = None, directory = None):
     if (key is None):
         login, start_date, end_date, directory, key = get_info_current_user()
@@ -511,7 +555,7 @@ def hide_user_files(public_key, directory):
 
 def get_user_categories(public_key, directory, full_path = False):
     user_categories = []
-    
+
     for root, dirs, files in os.walk(directory):
         for f in files:
             if (is_displayed_file_mine(f, public_key)):
