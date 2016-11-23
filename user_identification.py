@@ -4,7 +4,6 @@
 import os
 import sys
 import shutil
-import grp, pwd
 import bcrypt
 import getpass
 import argparse
@@ -17,7 +16,9 @@ import base64
 from struct import pack
 from Crypto.Cipher import *
 from Crypto.PublicKey import RSA
-from Crypto.Hash import HMAC
+from Crypto.Hash import HMAC, SHA256
+import Crypto.Util.number as CUN
+from ast import literal_eval as make_tuple
 
 # TODO:
 #       - Put everything that can be reused for file encryption in another file and import.
@@ -101,6 +102,9 @@ GET_PID_BACKGROUND_SESSION_CHECK_CMD = "ps aux | grep -E -e 'sleep .* user_ident
 FILENAME_VALID_CHARS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-[].'
 COUNT_FILENAME_VALID_CHARS = len(FILENAME_VALID_CHARS)
 
+# NOTE: Time to wait after user enters wrong login/password.
+ACCESS_DENIED_WAIT_DELAY = 1.5;
+
 def eprint(*args, **kwargs):    
     if (kwargs.pop("prog_name", True)):
         print("%s: %s" % (os.path.basename(sys.argv[0]), *args), file=sys.stderr, **kwargs)
@@ -114,6 +118,23 @@ def check_platform(plats, message = "This platform is currently not supported!")
         return False
     
     return True
+
+def confirm_password(test_pwd, input_text = "Confirm password:"):
+    confirm_pwd = getpass.getpass(input_text)
+    
+    if (confirm_pwd != test_pwd):
+        print("Passwords do not match.")
+        return False
+    
+    return True
+
+def enter_password_and_confirm(input_text = "Password:", confirm_input_text = "Confirm password:"):
+    test_pwd = getpass.getpass(input_text)
+
+    if (confirm_password(test_pwd, confirm_input_text)):
+        return test_pwd
+    
+    return None
 
 # FIXME: Replace this!
 def int_to_cust(i):
@@ -230,24 +251,39 @@ def prompt_user(login = None):
 
     registered, user_line = user_already_registered(login)
 
-    if (not(registered)):
-        return False, login, password
+    if (registered):
+        salt, pwd_key = user_line.split(b"$")[1:]
 
-    salt, pwd_key = user_line.split(b"$")[1:]
+        return (password_key(password, salt).hex().encode() == pwd_key) and registered, login, password
+    return False, login, None
 
-    if (password_key(password, salt).hex().encode() == pwd_key):
-        return registered, login, password
-    
-    return registered, None, None
+def prompt_new_user(login = None):
+    if (login is None):
+        login = input("Login: ")
+
+    if (len(login) == 0):
+        return False, None, None
+        
+    registered, user_line = user_already_registered(login)
+
+    if (registered):
+        return True, login, None
+
+    password = enter_password_and_confirm();
+
+    if ((password is None) or (len(password) == 0)):
+        password = None
+
+    return False, login, password
 
 def prompt_create_new_user(login = None):
-    already_registered, login, password = prompt_user(login)
+    already_registered, login, password = prompt_new_user(login)
     
     if (already_registered):
         print("User already registered.")
         return False
     
-    if (login == None):
+    if ((login is None) or (password is None)):
         print("Invalid indentifiers.")
         return False
 
@@ -363,7 +399,7 @@ def display_non_dummy_files(private_key):
             
             if (category != None):
                 file_path = os.path.join(root, f)
-                open(category, "w+").close();
+                open(category, "w+").close()
                 # shutil.move(file_path, category)
 
 def connect_as_user(login = None, time_limit = 0):
@@ -376,18 +412,32 @@ def connect_as_user(login = None, time_limit = 0):
         cookie = get_yapm_file(YAPM_CURRENT_USER_COOKIE, "wb+")
 
         current_time = time.time()
-        enc_login = private_encrypt(key, login)
-        enc_current_time = private_encrypt(key, str(current_time))
-        enc_disconnect_time = private_encrypt(key, str(current_time + time_limit))
-        enc_current_dir = private_encrypt(key, os.getcwd())
+        
+        toto = ""
+        toto += "Login = " + login + "\n"
+        toto += "Connexion timestamp = " + str(current_time) + "\n"
+        
+        if (time_limit > 0):
+            toto += "Deconnexion timestamp = " + str(current_time + time_limit) + "\n"
+            
+        toto += "Directory = " + os.getcwd() + "\n"
+        toto += key.publickey().exportKey().decode() + "\n"
 
-        cookie.write((enc_login + "\n").encode())
-        cookie.write((enc_current_time + "\n").encode())
-        cookie.write((enc_disconnect_time + "\n").encode())
-        cookie.write((enc_current_dir + "\n").encode())
+        toto = toto.encode()
+
+        # TODO: Allow specification of hash and sign algorithms.
+        #       RSA for now.
+        hash_toto = SHA256.new(toto).hexdigest().encode()
+
+        # NOTE: For RSA only, K is not used.
+        # K = CUN.getRandomNumber(128, os.urandom)
+        K = ""
         
-        cookie.write(key.publickey().exportKey())
-        
+        # NOTE: For RSA only, signature is a 1 element tuple.
+        signature = str(key.sign(hash_toto, K)).encode()
+
+        cookie.write(b"Signature = " + signature + b"\n")
+        cookie.write(toto + b"\n")        
         cookie.close()
 
         if (time_limit > 0):
@@ -397,53 +447,83 @@ def connect_as_user(login = None, time_limit = 0):
                 eprint("Failed to start background session check.\nYou will not be disconnected automatically.")
         
         return True
-
+    else:
+        time.sleep(ACCESS_DENIED_WAIT_DELAY)
+        
     return False
 
+# Return decode content after start and before end (both excluding).
+def get_string_after(byte_content, start, end = b"\n"):
+    found = False
+    result = None
+
+    try:
+        result = byte_content.split(start)[1].split(end)[0].decode()
+        found = True;
+    except:
+        pass
+        
+    return result, found
+
+# Return info on current user if its connexcion is still valid (hasn't
+# run out of time, and its cookie hasn't been tampered with).
+# Return Nones otherwhise.
 def get_info_current_user():
-    enc_login = None
-    enc_start_date = None
-    enc_end_date = None
-    enc_dir = None
-    public_key = None
-    
     try:
         with open(YAPM_CURRENT_USER_COOKIE, "rb") as cookie:
-            enc_login = cookie.readline()
-            enc_start_date = cookie.readline()
-            enc_end_date = cookie.readline()
-            enc_dir = cookie.readline()
+            signature_tag = b"Signature = "
+            signature = cookie.readline().split(signature_tag)[1][:-1];
+            signature = make_tuple(signature.decode())
             
-            key = b""
-            for l in cookie:
-                key += l
-
-        public_key = RSA.importKey(key)
-
-        login = public_decrypt(public_key, enc_login)
-        start_date = float(public_decrypt(public_key, enc_start_date))
-        end_date = float(public_decrypt(public_key, enc_end_date))
-
-        directory = public_decrypt(public_key, enc_dir)
-        
-        if (start_date != end_date):
-            if (time.time() >= end_date):
-                disconnect_user(start_date, end_date, directory, public_key)
-                return None, None, None, None, None
-
-            pid = get_pid_background_session_check()
-
-            if (len(pid) == 0):
-                print("WARNING:")
-                print("A background process (to check your session) has been killed suspiciously (i.e: not by me).")
-                print("If it's not your doing, make sure to disconnect manually.")
-                print("Otherwhise, files you own will still be visible")
-                print("until you run this program again (once the timer has run out).")
-                print("")
-        
-        return login, start_date, end_date, directory, public_key
+            content = cookie.read()[:-1]
+            
+            public_key_tag = (b"-----BEGIN PUBLIC KEY-----", b"-----END PUBLIC KEY-----")
+            public_key = content.split(public_key_tag[0])[1].split(public_key_tag[1])[0]
+            
+            public_key = public_key_tag[0] + content.split(public_key_tag[0])[1].split(public_key_tag[1])[0] + public_key_tag[1]
+            public_key = RSA.importKey(public_key)
+            
+            hash_toto = SHA256.new(content).hexdigest().encode()
+            
+            if (public_key.verify(hash_toto, signature)):
+                login_tag = b"Login = "
+                login = get_string_after(content, login_tag)[0]
+                
+                directory_tag = b"Directory = "
+                directory = get_string_after(content, directory_tag)[0]
+                
+                connexion_timestamp_tag = b"Connexion timestamp = "
+                connexion_timestamp = float(get_string_after(content, connexion_timestamp_tag)[0])
+                
+                deconnexion_timestamp = -1
+                deconnexion_timestamp_tag = b"Deconnexion timestamp = "
+                deconnexion_str, deconnexion_found = get_string_after(content, deconnexion_timestamp_tag)
+                
+                if (deconnexion_found):
+                    deconnexion_timestamp = float(deconnexion_str)
+                    
+                    if (time.time() >= deconnexion_timestamp):
+                        disconnect_user(True, directory, public_key)
+                        return None, None, None, None, None
+                    
+                    pid = get_pid_background_session_check()
+                    
+                    if (len(pid) == 0):
+                        print("WARNING:")
+                        print("A background process (to check your session) has been killed suspiciously (i.e: not by me).")
+                        print("If it's not your doing, make sure to disconnect manually.")
+                        print("Otherwhise, files you own will still be visible")
+                        print("until you run this program again (once the timer has run out).")
+                        print("")
+                        
+                return login, connexion_timestamp, deconnexion_timestamp, directory, public_key
+            else:
+                os.remove(YAPM_CURRENT_USER_COOKIE)
+                eprint("error: current user's cookie has been tampered with. Logging you out...")
     except:
-        return None, None, None, None, None
+        pass
+
+    return None, None, None, None, None
 
 def get_start_date_current_user():
     login, start_date, end_date, directory, key = get_info_current_user()
@@ -491,7 +571,7 @@ def dump_user_info():
     print("")
     print("Connected at: " + datetime.datetime.fromtimestamp(start_date).strftime('%H:%M:%S %Y-%m-%d'))
     
-    if (start_date != end_date):
+    if (end_date != -1):
         print("Connected until: " + datetime.datetime.fromtimestamp(end_date).strftime('%H:%M:%S %Y-%m-%d'))
         print(str(math.floor(end_date - time.time())) + " seconds left")
 
@@ -525,34 +605,44 @@ def private_decrypt(private_key, enc_m, enc_m_len = None, encoding = "utf-8", by
     except:
         return None
 
-# NOTE: m must be a string.
-#       Return an hexadecimal string.
-def private_encrypt(private_key, m, encoding = "utf-8", byteorder = "little"):
-    return hex(private_key.decrypt(int.from_bytes(m.encode(encoding), byteorder=byteorder)))
+# NOTE: Replaced by signing and verifying.
+# # NOTE: m must be a string.
+# #       Return an hexadecimal string.
+# def private_encrypt(private_key, m, encoding = "utf-8", byteorder = "little"):
+#     return hex(private_key.decrypt(int.from_bytes(m.encode(encoding), byteorder=byteorder)))
 
-# NOTE: enc_m must be an hexadecimal string.
-#       Return a string.
-#       Return None if enc_m can not be decrypted.
-def public_decrypt(public_key, enc_m, enc_m_len = None, encoding = "utf-8", byteorder = "little"):
-    try:
-        enc_m = int(enc_m, 16)
+# # NOTE: enc_m must be an hexadecimal string.
+# #       Return a string.
+# #       Return None if enc_m can not be decrypted.
+# def public_decrypt(public_key, enc_m, enc_m_len = None, encoding = "utf-8", byteorder = "little"):
+#     try:
+#         enc_m = int(enc_m, 16)
 
-        if (enc_m_len is None):
-            enc_m_len = math.ceil(math.log(enc_m, 2) / 8)
+#         if (enc_m_len is None):
+#             enc_m_len = math.ceil(math.log(enc_m, 2) / 8)
 
-        return public_key.encrypt(enc_m, 'x')[0].to_bytes(enc_m_len, byteorder=byteorder).decode(encoding).replace('\0', '')
-    except:
-        return None
+#         return public_key.encrypt(enc_m, 'x')[0].to_bytes(enc_m_len, byteorder=byteorder).decode(encoding).replace('\0', '')
+#     except:
+#         return None
 
-def hide_user_files(public_key, directory):
+# NOTE: For now, it removes the files if they belong to the user.
+# TODO: Check if the file has been created when the user logged
+# in. Otherwhise, it could erase something important.
+#       Could also just create each file in a yapm directory instead.
+# Hide categories belonging to the current user.
+def hide_user_categories(public_key, directory):
     user_categories = get_user_categories(public_key, directory, True)
 
     for category in user_categories:
         try:
+            # NOTE; Yes, this counts as hiding...
             os.remove(category)
         except:
             eprint("Failed to hide category '%s'." % os.path.basename(category))
 
+# NOTE: Assumes each file in directory may be a category. Tries to get
+# a valid file for each one.
+# Return categories belonging to the current user.
 def get_user_categories(public_key, directory, full_path = False):
     user_categories = []
 
@@ -579,16 +669,16 @@ def revive_current_user_if_needed(time_limit = 0):
 
     return public_key
 
-def disconnect_user(start_date, end_date, directory, public_key):
+def disconnect_user(has_background_check, directory, public_key):
     if (not(public_key is None)):
         # TODO: Notify user and ask him to indicate the directory?
         if (directory is None):
             directory = os.getcwd()
             
-        hide_user_files(public_key, directory)
+        hide_user_categories(public_key, directory)
         os.remove(YAPM_CURRENT_USER_COOKIE)
 
-        if (start_date != end_date):
+        if (has_background_check):
             try:
                 pid = get_pid_background_session_check()
             
@@ -600,7 +690,7 @@ def disconnect_current_user():
     # public_key = revive_current_user_if_needed()
     login, start_date, end_date, directory, public_key = get_info_current_user()
     
-    disconnect_user(start_date, end_date, directory, public_key)
+    disconnect_user(not(end_date is None), directory, public_key)
         
 
 class PRNG(object):

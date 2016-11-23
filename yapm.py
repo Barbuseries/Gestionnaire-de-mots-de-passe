@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
+# PYTHON_ARGCOMPLETE_OK
 
+import argcomplete
 from user_identification import *
 from enum import Enum
 
@@ -11,23 +13,6 @@ class CategoryStatus(Enum):
 
 def is_arg_set(arg):
     return not(arg is None)
-
-def confirm_password(test_pwd, input_text = "Confirm password:"):
-    confirm_pwd = getpass.getpass(input_text)
-    
-    if (confirm_pwd != test_pwd):
-        print("Passwords do not match.")
-        return False
-    
-    return True
-
-def enter_password_and_confirm(input_text = "Password:", confirm_input_text = "Confirm password:"):
-    test_pwd = getpass.getpass(input_text)
-
-    if (confirm_password(test_pwd, confirm_input_text)):
-        return test_pwd
-    
-    return None
     
 # FIXME: RSA encryption returns a filename way too long.
 #        Find shorter way of encrypting.
@@ -50,7 +35,7 @@ def create_category(name, public_key, encryt_filename = False):
             enc_check = public_encrypt(public_key, generate_dummy_check(name))
             category.write(enc_check + "\n")
 
-        os.system("ln -s " + file_path + " " + name)
+        os.system("touch " + name)
 
         return True, CategoryStatus.exist
     except Exception as e:
@@ -69,30 +54,30 @@ def delete_category(name, public_key):
         return False, CategoryStatus.inaccessible
     
     return True, CategoryStatus.do_not_exist
-    
 
-if __name__ == "__main__":
-    if (not(check_platform(["posix"]))):
+
+def main():
+    if (not(check_platform(["posix", "nt"]))):
         quit()
-    
+        
     parser = argparse.ArgumentParser()
     
     user_id_group = parser.add_argument_group("User identification", "Options related to user identification.")
     user_id_group.add_argument("--add-user", metavar="USER", dest="new_user", type=str, nargs=1,
-                        help="Add a new user and exit.")
+                               help="Add a new user and exit.")
     user_id_group.add_argument("-u", "--user", metavar="USER", dest="user", type=str, nargs=1,
-                        help="Connect as user and exit.")
+                               help="Connect as user and exit.")
     user_id_group.add_argument("-t", "--time", metavar="TIME", dest="time", type=int, nargs=1,
-                        help="Connect, indicate to stay logged in for TIME seconds and exit. (TIME >= 0, default 0 (no limit))")
+                               help="Connect, indicate to stay logged in for TIME seconds and exit. (TIME >= 0, default 0 (no limit))")
     user_id_group.add_argument("--dump-user-info", dest="dump_user_info", action="store_const",
-                        const=True,
-                        help='Display all user-related information and exit.')
+                               const=True,
+                               help='Display all user-related information and exit.')
     user_id_group.add_argument("--show-categories", dest="show_categories", action="store_const",
-                        const=True,
-                        help='Display all user\'s categories and exit.')
+                               const=True,
+                               help='Display all user\'s categories and exit.')
     user_id_group.add_argument("-k", "--stop-session", dest="disconnect", action="store_const",
-                        const=True,
-                        help='Stop current user session and exit.')
+                               const=True,
+                               help='Stop current user session and exit.')
     
     category_group = parser.add_argument_group("Categories", "Options related to categories.")
     category_group.add_argument("-c", "--create-category", metavar="CATEGORY", dest="categories_to_create", type=str, nargs='+',
@@ -114,6 +99,8 @@ if __name__ == "__main__":
                              help='Get the VALUE from KEY.')
     pairs_group.add_argument('-r', '--remove-pair', dest='remove_pairs', metavar='KEY', type=str, nargs='+',
                              help='Remove the KEY-VALUE pair in CATEGORY.')
+
+    argcomplete.autocomplete(parser)
     
     args = parser.parse_args()
 
@@ -121,7 +108,7 @@ if __name__ == "__main__":
     if (args.disconnect):
         disconnect_current_user()
         quit()
-    
+        
     if (is_arg_set(args.new_user)):
         new_user = args.new_user[0]
         
@@ -137,7 +124,7 @@ if __name__ == "__main__":
             if (time_limit < 0):
                 print("error: -t|--time: TIME must be positive.")
                 quit()
-            disconnect_current_user()
+                disconnect_current_user()
 
     
     if (is_arg_set(args.user)):
@@ -205,7 +192,7 @@ if __name__ == "__main__":
                     
                     for line in encrypted_file:
                         print(line)
-            
+                        
 
     if (is_arg_set(args.set_pairs)):
         kv = [i.split(":") for i in args.set_pairs]
@@ -224,10 +211,14 @@ if __name__ == "__main__":
                 
             index += 1
 
-            
-
     if (is_arg_set(args.get_pairs)):
         pass
 
     if (is_arg_set(args.remove_pairs)):
+        pass
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
         pass

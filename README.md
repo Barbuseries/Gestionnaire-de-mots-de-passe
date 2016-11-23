@@ -13,3 +13,9 @@ Extract and go to bcrypt's directory.
 python3 setup.py build
 python3 setup.py install
 ```
+### Add autocompletion
+```
+sudo pip3 install argcomplete
+sudo activate-global-python-argcomplete
+```
+Restart your terminal.
