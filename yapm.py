@@ -18,14 +18,11 @@ def is_arg_set(arg):
 #        Find shorter way of encrypting.
 #        See int_to_cust and cust_to_int in user_identification.py.
 # TODO: Generate dummy files as well.
-def create_category(name, public_key, encryt_filename = False):
+def create_category(name, public_key, add_to_completion = True):
     if (not(get_file_from_category(name, public_key) is None)):
         return False, CategoryStatus.exist
     
-    if (encryt_filename):
-        final_name = int_to_cust(int(public_encrypt(public_key, name), 16))
-    else:
-        final_name = name
+    final_name = int_to_cust(int(public_encrypt(public_key, name), 16))
 
     try:
         file_path = os.path.join(YAPM_FILE_DB, "." + final_name)
@@ -35,7 +32,7 @@ def create_category(name, public_key, encryt_filename = False):
             enc_check = public_encrypt(public_key, generate_dummy_check(name))
             category.write(enc_check + "\n")
 
-        os.system("touch " + name)
+        open(os.path.join(YAPM_USER_CATEGORIES_DIRECTORY, name), "w+").close()
 
         return True, CategoryStatus.exist
     except Exception as e:
@@ -49,12 +46,14 @@ def delete_category(name, public_key):
 
     try:
         os.remove(file_path)
-        os.remove(name)
+        os.remove(os.path.join(YAPM_USER_CATEGORIES_DIRECTORY, name))
     except:
         return False, CategoryStatus.inaccessible
     
     return True, CategoryStatus.do_not_exist
 
+def CategoryCompleter(prefix, **kwargs):
+    return (c for c in os.listdir(YAPM_USER_CATEGORIES_DIRECTORY))
 
 def main():
     if (not(check_platform(["posix", "nt"]))):
@@ -82,11 +81,11 @@ def main():
     category_group = parser.add_argument_group("Categories", "Options related to categories.")
     category_group.add_argument("-c", "--create-category", metavar="CATEGORY", dest="categories_to_create", type=str, nargs='+',
                                 help="Create CATEGORY if it does not already exist.")
-    category_group.add_argument("-e", "--encrypt-filename", dest="encrypt_filename", action="store_const",
-                                const=True,
-                                help='Encrypt filename when creating category.')
+    # category_group.add_argument("-e", "--set-hidden", dest="hide", action="store_const",
+    #                             const=True,
+    #                             help='Do not add category to autocompletion.')
     category_group.add_argument("-d", "--delete-category", metavar="CATEGORY", dest="categories_to_delete", type=str, nargs='+',
-                                help="Delete CATEGORY if it exists.")
+                                help="Delete CATEGORY if it exists.").completer = CategoryCompleter
     category_group.add_argument('-w', '--show-category', metavar="CATEGORY", dest='categories_to_show', type=str, nargs='+',
                                 help='Display content of CATEGORY.')
 
@@ -124,7 +123,7 @@ def main():
             if (time_limit < 0):
                 print("error: -t|--time: TIME must be positive.")
                 quit()
-                disconnect_current_user()
+            disconnect_current_user()
 
     
     if (is_arg_set(args.user)):
@@ -146,9 +145,9 @@ def main():
 
     # category_modif_group option checking    
     if (is_arg_set(args.categories_to_create)):
-        encrypt_filename = False
-        if (args.encrypt_filename):
-            encrypt_filename = True
+        add_to_completion = True
+        if (args.hide):
+            add_to_completion = False
         for category in args.categories_to_create:
             # TODO: Do not create category if password inputing fails.
             success, status = create_category(category, public_key, encrypt_filename)

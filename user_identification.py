@@ -13,6 +13,7 @@ import math
 import subprocess
 import datetime
 import base64
+import hashlib
 from struct import pack
 from Crypto.Cipher import *
 from Crypto.PublicKey import RSA
@@ -33,7 +34,7 @@ from ast import literal_eval as make_tuple
 #           - If login in user database,
 #               - error
 #           - Otherwhise, add login:$salt$key_derived_password
-#       - Connecgting as user
+#       - Connecting as user
 #           - Login prompt
 #           - Password prompt
 #           - If not login in database
@@ -73,7 +74,11 @@ YAPM_DUMMY_CHECK = "__dummy:"
 YAPM_DIRECTORY = os.path.join(os.path.expanduser("~"), ".yapm")
 YAPM_USER_DB = os.path.join(YAPM_DIRECTORY, ".users")
 YAPM_FILE_DB = os.path.join(YAPM_DIRECTORY, ".db")
+YAPM_USER_CATEGORIES_DIRECTORY = os.path.join(YAPM_DIRECTORY, ".categories")
 
+# NOTE + TODO: Right now, directory is not used anymore:
+#              Plain-text category names are files in YAPM_USER_CATEGORIES_DIRECTORY.
+#              Should we keep directory, revert, find a better way?
 # NOTE: cookie stores the following: (everything is accessible via get_info_current_user())
 #       - User's login.
 #       - Connexion date encrypted by the user's private key.
@@ -155,33 +160,6 @@ def cust_to_int(s):
 def get_pid_background_session_check():
     return subprocess.check_output(GET_PID_BACKGROUND_SESSION_CHECK_CMD, shell=True)[:-1].decode()
 
-# NOTE: pad wth '#' until length of m is a multiple of s.
-# If r, pad right, else, pad left.
-def pad(m, s, r = True):
-    m = "_" * (not(r)) +  m + "_" * (r)
-    size_m = len(m)
-    
-    if (size_m % s):
-        return (m * (r)) + '#' * (s * ((size_m // s) + 1) - size_m) + (m * (not(r)))
-            
-    return m
-
-def unpad(m, r = True):
-    if (r):
-        start_pad = m.rfind("_");
-
-        if (start_pad == -1):
-            return m
-        
-        return m[:start_pad]
-
-    start_pad = m.find("_");
-
-    if (start_pad == -1):
-        return m
-
-    return m[(start_pad + 1):]
-    
 def touch_open(filename, *args, **kwargs):
     open(filename, "a").close()
     return open(filename, *args, **kwargs)
@@ -216,6 +194,12 @@ def password_key(password, salt = b'salt'):
                       salt = salt,
                       desired_key_bytes = 32,
                       rounds=100)
+
+def password_hash(password, salt = b'salt'):
+    return hashlib.pbkdf2_hmac('sha256',
+                               password.encode(),
+                               salt,
+                               100000).hex()
         
 def user_already_registered(login):
     database = get_user_db("rb+")
@@ -253,8 +237,8 @@ def prompt_user(login = None):
 
     if (registered):
         salt, pwd_key = user_line.split(b"$")[1:]
-
-        return (password_key(password, salt).hex().encode() == pwd_key) and registered, login, password
+        return (password_hash(password, salt).encode() == pwd_key) and registered, login, password
+    
     return False, login, None
 
 def prompt_new_user(login = None):
@@ -291,10 +275,13 @@ def prompt_create_new_user(login = None):
     database.seek(0, os.SEEK_SET)
 
     # TODO: Allow specification of salt's size.
-    salt = os.urandom(32).hex().encode()
-    pwd_key = password_key(password, salt).hex().encode()
+    #       (But > 16 bytes)
+    salt = os.urandom(16).hex().encode()
 
-    user_line = login.encode() + b":$" + salt + b"$" + pwd_key;
+    # TODO?: Allow specification of algorithm used?
+    pwd_hash = password_hash(password, salt).encode()
+
+    user_line = login.encode() + b":$" + salt + b"$" + pwd_hash;
 
     database.write(user_line)
     database.write(b'\n')
@@ -344,9 +331,6 @@ def is_displayed_file_mine(possible_category, public_key):
 
     return check_dummy_check(possible_category, dummy_check, public_key)
 
-# TODO: Currently, filename is check as is then decrypted if no
-#       corresponding category is found.  Should we just check
-#       according to user's preferences?
 def get_category_from_file(filename, private_key):
     category = filename
             
@@ -358,11 +342,13 @@ def get_category_from_file(filename, private_key):
     if (dummy_check is None):
         return None
 
-    # NOTE: First check if filename as is.
-    if (check_dummy_check(category, dummy_check, private_key.publickey())):
-        return category
+    # NOTE: Should not be useful anymore as filename are encrypted
+    # anyway.
+    # # NOTE: First check if filename as is.
+    # if (check_dummy_check(category, dummy_check, private_key.publickey())):
+    #     return category
 
-    # NOTE: Finally, check decrypted filename.
+    # NOTE: Check decrypted filename.
     # FIXME: See int_to_cust and cust_to_int.
     category = hex(cust_to_int(category))
     category = private_decrypt(private_key, category)
@@ -393,13 +379,15 @@ def get_file_from_category(name, public_key):
     return None
 
 def display_non_dummy_files(private_key):
+    if not os.path.exists(YAPM_USER_CATEGORIES_DIRECTORY):
+        os.makedirs(YAPM_USER_CATEGORIES_DIRECTORY)
     for root, dirs, files in os.walk(YAPM_FILE_DB):
         for f in files:
             category = get_category_from_file(f, private_key)
             
             if (category != None):
                 file_path = os.path.join(root, f)
-                open(category, "w+").close()
+                open(os.path.join(YAPM_USER_CATEGORIES_DIRECTORY, category), "w+").close()
                 # shutil.move(file_path, category)
 
 def connect_as_user(login = None, time_limit = 0):
@@ -555,7 +543,8 @@ def dump_user_categories(key = None, directory = None):
         print("No user is logged in.")
         return
 
-    user_categories = get_user_categories(key, directory)
+    # user_categories = get_user_categories(key, directory)
+    user_categories = get_user_categories(key, YAPM_USER_CATEGORIES_DIRECTORY)
     
     for category in user_categories:
         print(category)
@@ -632,13 +621,14 @@ def private_decrypt(private_key, enc_m, enc_m_len = None, encoding = "utf-8", by
 # Hide categories belonging to the current user.
 def hide_user_categories(public_key, directory):
     user_categories = get_user_categories(public_key, directory, True)
-
-    for category in user_categories:
-        try:
-            # NOTE; Yes, this counts as hiding...
-            os.remove(category)
-        except:
-            eprint("Failed to hide category '%s'." % os.path.basename(category))
+    shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY)
+    # shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY);
+    # for category in user_categories:
+    #     try:
+    #         # NOTE; Yes, this counts as hiding...
+    #         os.remove(category)
+    #     except:
+    #         eprint("Failed to hide category '%s'." % os.path.basename(category))
 
 # NOTE: Assumes each file in directory may be a category. Tries to get
 # a valid file for each one.
