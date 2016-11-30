@@ -128,7 +128,7 @@ def confirm_password(test_pwd, input_text = "Confirm password:"):
     confirm_pwd = getpass.getpass(input_text)
     
     if (confirm_pwd != test_pwd):
-        print("Passwords do not match.")
+        eprint("passwords do not match.")
         return False
     
     return True
@@ -656,6 +656,8 @@ def revive_current_user_if_needed(time_limit = 0):
         if (not(connect_as_user(None, time_limit))):
             print("Access denied.")
             quit()
+            
+        public_key = get_public_key_current_user()
 
     return public_key
 
