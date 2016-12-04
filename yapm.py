@@ -5,6 +5,10 @@
 import argcomplete
 from user_identification import *
 from enum import Enum
+from collections import OrderedDict
+
+# TODO?: Instead of just saving hash of password key, create
+#        public/private RSA keys to sign file.
 
 class CategoryStatus(Enum):
     do_not_exist = 0
@@ -17,8 +21,7 @@ def is_arg_set(arg):
 # FIXME: RSA encryption returns a filename way too long.
 #        Find shorter way of encrypting.
 #        See int_to_cust and cust_to_int in user_identification.py.
-# TODO: Make final_name be dependent on password.
-#       Generate dummy files as well.
+# TODO:  Generate dummy files as well.
 def create_category(name, public_key, password, add_to_completion = True):
     if (not(get_file_from_category(name, public_key) is None)):
         return False, CategoryStatus.exist
@@ -27,14 +30,16 @@ def create_category(name, public_key, password, add_to_completion = True):
 
     try:
         file_path = os.path.join(YAPM_FILE_DB, "." + final_name)
+
+        # TODO: Change check to just be name? (+ seed)
+        enc_check = public_encrypt(public_key, generate_dummy_check(name))
+    
+        with open(file_path, "wb+") as category:
+            category.write(enc_check.encode() + b"\n")
         
-        with open(file_path, "w+") as category:
-            # TODO: Change check to juxst be name? (+ seed)            
-            enc_check = public_encrypt(public_key, generate_dummy_check(name))
-            category.write(enc_check + "\n")
-            
-            # # TODO: At least, add some salt.
-            # category.write(password_hash(password) + "\n")
+            salt = os.urandom(16).hex().encode()
+            pwd_keyhash = password_hash(password, salt)
+            category.write(salt + b"$" + pwd_keyhash.encode() + b"\n")
 
         open(os.path.join(YAPM_USER_CATEGORIES_DIRECTORY, name), "w+").close()
 
@@ -42,8 +47,6 @@ def create_category(name, public_key, password, add_to_completion = True):
     except Exception as e:
         return False, CategoryStatus.inaccessible
 
-# TODO: Take password as parameter, or make name be dependent on
-# password.
 def delete_category(name, public_key):
     file_path = get_file_from_category(name, public_key)
 
@@ -59,20 +62,25 @@ def delete_category(name, public_key):
     return True, CategoryStatus.do_not_exist
 
 # NOTE: Do not forget to close it.
-# TODO: Take password as parameter, or make name be dependent on
-# password.
 def open_category(name, public_key, flags):
     file_path = get_file_from_category(name, public_key)
     
     if (file_path is None):
-        eprint("Failed to access category '%s': does not exist." % name)
-        return False, None
+        eprint("failed to access category '%s': does not exist." % name)
+        return False, None, None
     
     encrypted_file = open(file_path, flags)
     # User ownership check.
     encrypted_file.readline()
+    
+    salt, pwd_keyhash = encrypted_file.readline()[:-1].split(b"$")
+    pwd_key = password_key(getpass.getpass(name + "'s password:"), salt)
 
-    return True, encrypted_file
+    if (password_keyhash(pwd_key, salt).encode() == pwd_keyhash):
+        return True, encrypted_file, pwd_key
+
+    print("Access denied.")
+    return False, None, None
 
 def CategoryCompleter(prefix, **kwargs):
     return (c for c in os.listdir(YAPM_USER_CATEGORIES_DIRECTORY))
@@ -116,6 +124,7 @@ def unpad(m, r = True, isBytes = False):
 
     return m[(start_pad + 1):]
 
+# TODO: Indicate if pair is 'private'. 
 def get_line_enc_content(enc_line, pwd_key):
     fields = None
     enc = None
@@ -145,7 +154,7 @@ def get_line_enc_content(enc_line, pwd_key):
 def main():
     if (not(check_platform(["posix", "nt"]))):
         quit()
-        
+
     parser = argparse.ArgumentParser()
     
     user_id_group = parser.add_argument_group("User identification", "Options related to user identification.")
@@ -158,16 +167,16 @@ def main():
     user_id_group.add_argument("--dump-user-info", dest="dump_user_info", action="store_const",
                                const=True,
                                help='Display all user-related information and exit.')
-    user_id_group.add_argument("--show-categories", dest="show_categories", action="store_const",
-                               const=True,
-                               help='Display all user\'s categories and exit.')
     user_id_group.add_argument("-k", "--stop-session", dest="disconnect", action="store_const",
                                const=True,
                                help='Stop current user session and exit.')
     
     category_group = parser.add_argument_group("Categories", "Options related to categories.")
     category_group.add_argument("categories", metavar='CATEGORY', type=str, nargs='*',
-                                help="Operate on CATEGORY").completer = CategoryCompleter
+                                help="Operate on CATEGORY.").completer = CategoryCompleter
+    category_group.add_argument("-l", "--list-categories", dest="list_categories", action="store_const",
+                                const=True,
+                                help='Display all user\'s categories and exit.')
     category_group.add_argument("-c", "--create-category", dest="to_create",
                                 action="store_const", const=True,
                                 help="Create CATEGORY if it does not already exist.")
@@ -181,13 +190,14 @@ def main():
                                 action="store_const", const=True,
                                 help='Display content of CATEGORY if it exists.')
 
+    # TODO: Allow multiline values.
     pairs_group = parser.add_argument_group("Pairs", "Options related to pairs.")
-    pairs_group.add_argument('-s', '--set-pair', dest='set_pairs', metavar='KEY:VALUE', type=str, nargs='+',
-                             help='Add a new KEY-VALUE pair in CATEGORY.')
-    pairs_group.add_argument('-g', '--get-value', dest='get_pairs', metavar='KEY', type=str, nargs='+',
-                             help='Get the VALUE from KEY.')
+    pairs_group.add_argument('-g', '--get-pair', dest='get_pairs', metavar='KEY', type=str, nargs='+',
+                             help='Get the KEY-VALUE pair associated with KEY in CATEGORY.')
     pairs_group.add_argument('-r', '--remove-pair', dest='remove_pairs', metavar='KEY', type=str, nargs='+',
                              help='Remove the KEY-VALUE pair in CATEGORY.')
+    pairs_group.add_argument('-s', '--set-pair', dest='set_pairs', metavar='KEY:VALUE', type=str, nargs='+',
+                             help='Add a new KEY-VALUE pair in CATEGORY.')
 
     argcomplete.autocomplete(parser)
     
@@ -258,30 +268,31 @@ def main():
         dump_user_info()
         quit()
 
-    if (args.show_categories):
+    if (args.list_categories):
         dump_user_categories()
         quit()
 
     # category_modif_group option checking
     if (to_create):
+        # TODO: Allow categories not be autocompleted.
         add_to_completion = True
         # if (args.hide):
         #     add_to_completion = False
         for category in args.categories:
             if (not(get_file_from_category(category, public_key) is None)):
-                eprint("Failed to create category '%s': already exists." % category)
+                eprint("failed to create category '%s': already exists." % category)
                 continue
 
             category_pwd = enter_password_and_confirm(category + "'s password:")
 
             if (category_pwd is None):
-                eprint("Failed to create category '%s': invalid password." % category)
+                eprint("failed to create category '%s': invalid password." % category)
                 continue
             
             success, status = create_category(category, public_key, category_pwd)
             
             if (not(success)):
-                eprint("Failed to create category '%s': could not access database." % category, end="")
+                eprint("failed to create category '%s': could not access database." % category, end="")
                 continue
                     
     if (to_delete):
@@ -289,7 +300,7 @@ def main():
             success, status = delete_category(category, public_key)
             
             if (not(success)):
-                eprint("Failed to delete category '%s': " % category, end="")
+                eprint("failed to delete category '%s': " % category, end="")
                 
                 if (status == CategoryStatus.do_not_exist):
                     eprint("does not exist.", prog_name=False)
@@ -300,90 +311,132 @@ def main():
     if (to_set):
         kv = [i.split(":") for i in args.set_pairs]
 
-        result = []
+        new_pairs = []
         index = 0
         for i in kv:
+            # TODO: Add indicator to set as 'private'.
             while ((len(i) < 2) or (i[1] == "")):
                 i = [i[0], getpass.getpass(i[0] + ":")]
 
             if (len(i) > 2):
-                eprint("Malformed KEY:VALUE pair '%s'." % ":".join(i))
+                eprint("malformed KEY:VALUE pair '%s'." % ":".join(i))
             elif (i[0] == ""):
                 eprint("VALUE '%s' is missing a KEY." % i[1])
             else:
-                result.append(i)
+                new_pairs.append(i)
                 
             index += 1
+        args.set_pairs = new_pairs
 
+    if (to_get):
+        args.get_pairs = list(OrderedDict.fromkeys(args.get_pairs))
+        
+    if (to_remove):
+        args.remove_pairs = list(OrderedDict.fromkeys(args.remove_pairs))
+
+    is_accessing_categories = (sum([to_get, to_remove, to_set, to_show]) != 0)
+
+    if (is_accessing_categories and (len(args.categories) == 0)):
+        eprint("no category specified.")
+    
+    if (is_accessing_categories and len(args.categories)):
+        args.categories = list(OrderedDict.fromkeys(args.categories))
+        
         # FIXME: Current implementation does not allow salt!
         for category in args.categories:
+            is_category_modified = False
             all_enc_pairs = {}
             all_old_lines = []
-            
-            success, encrypted_file = open_category(category, public_key, "r+b")
+
+            success, encrypted_file, pwd_key = open_category(category, public_key, "r+b")
 
             if (not(success)):
                 continue
 
-            pwd_key = password_key(getpass.getpass(category + "'s password:"))
+            if (to_get):
+                get_pairs = args.get_pairs[:]
+                
+            if (to_remove):
+                remove_pairs = args.remove_pairs[:]
 
             for enc_line in encrypted_file:
                 fields, enc, dec = get_line_enc_content(enc_line, pwd_key)
-            
+
+                # NOTE: Allow fake pairs.
                 if (not(fields) is None):
+                    skip = False
+
+                    if (to_get):
+                        for key in get_pairs[:]:
+                            if (enc.encrypt(pad(key, 16)) == fields[0]):
+                                print("%s:%s" % (key,
+                                                 unpad(dec.decrypt(fields[1]), 16, isBytes = True).decode()))
+                                get_pairs.remove(key)
+                    
+                    if (to_remove):
+                        for key in remove_pairs[:]:
+                            if (enc.encrypt(pad(key, 16)) == fields[0]):
+                                skip = True
+                                remove_pairs.remove(key)
+
+                    if (skip):
+                        is_category_modified = True
+                        continue
+                                
                     all_enc_pairs[fields[0]] = fields[1]
                 else:
-                    all_old_lines.append(enc_line)
+                    all_old_lines.append(fields)
 
-            encrypted_file.seek(0, os.SEEK_SET)
-            encrypted_file.readline()
+            # TODO?: Differentiate between get and remove error messages.
+            if (to_get):
+                for key in get_pairs:
+                    eprint("category '%s': invalid key '%s'." % (category, key))
 
-            for l in all_old_lines:
-                encrypted_file.write(l)
+            if (to_remove):
+                for key in remove_pairs:
+                    eprint("category '%s': invalid key '%s'." % (category, key))
 
-            salt = os.urandom(AES.block_size)
+            if (not(to_get)):
+                salt = os.urandom(AES.block_size)
             
-            enc = AES.new(pwd_key)
+                enc = AES.new(pwd_key)
             
-            for i in result:
-                all_enc_pairs[enc.encrypt(pad(i[0], 16))] = enc.encrypt(pad(i[1], 16))
+                if (to_set):
+                    for i in args.set_pairs:
+                        all_enc_pairs[enc.encrypt(pad(i[0], 16))] = enc.encrypt(pad(i[1], 16))
 
-            for enc_k, enc_v in all_enc_pairs.items():
-                line = pad(b"valid+" +
-                           enc_k + b"+" + enc_v,
-                           16, isBytes = True)
+                        is_category_modified = True
+
+                if (is_category_modified):
+                    encrypted_file.seek(0, os.SEEK_SET)
+                    encrypted_file.readline()
+                    encrypted_file.readline()
                 
-                enc_line = base64.b64encode(salt + enc.encrypt(line), altchars=b'-_')
-
-                encrypted_file.write(enc_line + b"\n")
-
-            if (encrypted_file):
-                encrypted_file.close()
-                
-    if (to_show):
-        for category in args.categories:
-            success, encrypted_file = open_category(category, public_key, "rb")
-
-            if (not(success)):
-                continue
-            else:
-                pwd_key = password_key(getpass.getpass(category + "'s password:"))
-                
-                print("%s:" % category)
-                for enc_line in encrypted_file:
-                    fields, enc, dec = get_line_enc_content(enc_line, pwd_key)
-                    if (not(fields) is None):
-                        print("%s:%s" % (unpad(dec.decrypt(fields[0]), 16, isBytes = True).decode(),
-                                         unpad(dec.decrypt(fields[1]), 16, isBytes = True).decode()))
+                    for l in all_old_lines:
+                        encrypted_file.write(l)
                         
-                if (encrypted_file):
-                    encrypted_file.close()
+                for enc_k, enc_v in all_enc_pairs.items():
+                    if (is_category_modified):
+                        # TODO: add indicator if it's private (uppercase V?).
+                        line = pad(b"valid+" +
+                                   enc_k + b"+" + enc_v,
+                                   16, isBytes = True)
 
-    if (to_get):
-        pass
+                        enc_line = base64.b64encode(salt + enc.encrypt(line), altchars=b'-_')
 
-    if (to_remove):
-        pass
+                        encrypted_file.write(enc_line + b"\n")
+
+                    # TODO: If pair is 'private', show '****' instead.
+                    if (to_show):
+                        print("%s:%s" % (unpad(dec.decrypt(enc_k), 16, isBytes = True).decode(),
+                                         unpad(dec.decrypt(enc_v), 16, isBytes = True).decode()))
+
+                if (is_category_modified):
+                    encrypted_file.truncate()
+            encrypted_file.close()
+            
+            if (to_get or to_show):
+                print("")
 
 if __name__ == "__main__":
     try:

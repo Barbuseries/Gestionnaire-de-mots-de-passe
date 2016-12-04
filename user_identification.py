@@ -195,9 +195,16 @@ def password_key(password, salt = b'salt'):
                       desired_key_bytes = 32,
                       rounds=100)
 
+# TODO: Should both of them have the same salt?
 def password_hash(password, salt = b'salt'):
     return hashlib.pbkdf2_hmac('sha256',
-                               password.encode(),
+                               password_key(password, salt),
+                               salt,
+                               100000).hex()
+
+def password_keyhash(password_key, salt = b'salt'):
+    return hashlib.pbkdf2_hmac('sha256',
+                               password_key,
                                salt,
                                100000).hex()
         
@@ -223,7 +230,7 @@ def user_already_registered(login):
     
     return False, None
 
-# TODO: Allow empty logins/passwords?
+# TODO?: Allow empty logins/passwords.
 def prompt_user(login = None):
     if (login is None):
         login = input("Login: ")
@@ -236,8 +243,8 @@ def prompt_user(login = None):
     registered, user_line = user_already_registered(login)
 
     if (registered):
-        salt, pwd_key = user_line.split(b"$")[1:]
-        return (password_hash(password, salt).encode() == pwd_key) and registered, login, password
+        salt, pwd_keyhash = user_line.split(b"$")[1:]
+        return (password_hash(password, salt).encode() == pwd_keyhash) and registered, login, password
     
     return False, login, None
 
@@ -614,21 +621,18 @@ def private_decrypt(private_key, enc_m, enc_m_len = None, encoding = "utf-8", by
 #     except:
 #         return None
 
-# NOTE: For now, it removes the files if they belong to the user.
-# TODO: Check if the file has been created when the user logged
-# in. Otherwhise, it could erase something important.
-#       Could also just create each file in a yapm directory instead.
-# Hide categories belonging to the current user.
-def hide_user_categories(public_key, directory):
-    user_categories = get_user_categories(public_key, directory, True)
-    shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY)
-    # shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY);
+# NOTE: Hide categories belonging to the current user.
+# def hide_user_categories(public_key, directory):
+    # user_categories = get_user_categories(public_key, directory, True)
+    # shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY)
     # for category in user_categories:
     #     try:
     #         # NOTE; Yes, this counts as hiding...
     #         os.remove(category)
     #     except:
     #         eprint("Failed to hide category '%s'." % os.path.basename(category))
+def hide_user_categories():
+    shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY)
 
 # NOTE: Assumes each file in directory may be a category. Tries to get
 # a valid file for each one.
@@ -651,8 +655,9 @@ def revive_current_user_if_needed(time_limit = 0):
     public_key = get_public_key_current_user()
     
     if (public_key is None):
-        # TODO: Check if any file is still visible or find a way
-        # to know if files still need to be hidden (file database, ...).
+        # NOTE: In case previous session did not end as expected.
+        hide_user_categories()
+        
         if (not(connect_as_user(None, time_limit))):
             print("Access denied.")
             quit()
@@ -667,7 +672,8 @@ def disconnect_user(has_background_check, directory, public_key):
         if (directory is None):
             directory = os.getcwd()
             
-        hide_user_categories(public_key, directory)
+        # hide_user_categories(public_key, directory)
+        hide_user_categories()
         os.remove(YAPM_CURRENT_USER_COOKIE)
 
         if (has_background_check):
