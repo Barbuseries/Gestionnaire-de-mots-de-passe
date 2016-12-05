@@ -21,9 +21,6 @@ from Crypto.Hash import HMAC, SHA256
 import Crypto.Util.number as CUN
 from ast import literal_eval as make_tuple
 
-# TODO:
-#       - Put everything that can be reused for file encryption in another file and import.
-
 # DONE (but still needing thoughts):
 #       - Everything relies on the integrity of ~/.yapm/.user_cookie
 
@@ -110,12 +107,12 @@ COUNT_FILENAME_VALID_CHARS = len(FILENAME_VALID_CHARS)
 # NOTE: Time to wait after user enters wrong login/password.
 ACCESS_DENIED_WAIT_DELAY = 1.5;
 
-def eprint(*args, **kwargs):    
+def eprint(*args, **kwargs):
     if (kwargs.pop("prog_name", True)):
         print("%s: %s" % (os.path.basename(sys.argv[0]), *args), file=sys.stderr, **kwargs)
     else:
         print(*args, file=sys.stderr, **kwargs)
-
+    
 def check_platform(plats, message = "This platform is currently not supported!"):
     if (os.name not in plats):
         if (not(message is None)):
@@ -632,7 +629,8 @@ def private_decrypt(private_key, enc_m, enc_m_len = None, encoding = "utf-8", by
     #     except:
     #         eprint("Failed to hide category '%s'." % os.path.basename(category))
 def hide_user_categories():
-    shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY)
+    if (os.path.exists(YAPM_USER_CATEGORIES_DIRECTORY)):
+        shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY)
 
 # NOTE: Assumes each file in directory may be a category. Tries to get
 # a valid file for each one.
@@ -668,9 +666,10 @@ def revive_current_user_if_needed(time_limit = 0):
 
 def disconnect_user(has_background_check, directory, public_key):
     if (not(public_key is None)):
-        # TODO: Notify user and ask him to indicate the directory?
-        if (directory is None):
-            directory = os.getcwd()
+        # XXX: Not used anymore (for now anyway...).
+        # # TODO: Notify user and ask him to indicate the directory?
+        # if (directory is None):
+        #     directory = os.getcwd()
             
         # hide_user_categories(public_key, directory)
         hide_user_categories()
