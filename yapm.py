@@ -105,28 +105,28 @@ def pad(m, s, r = True, isBytes = False):
 def unpad(m, r = True, isBytes = False):
     if (r):
         if (not(isBytes)):
-            start_pad = m.rfind("_")
+            start_pad = m.rfind("_#")
         else:
-            start_pad = m.rfind(b"_")
+            start_pad = m.rfind(b"_#")
 
         if (start_pad == -1):
             return m
-        
+
         return m[:start_pad]
 
     if (not(isBytes)):
-        start_pad = m.find("_")
+        start_pad = m.find("_#")
     else:
-        start_pad = m.find(b"_")
+        start_pad = m.find(b"_#")
 
     if (start_pad == -1):
         return m
 
     return m[(start_pad + 1):]
 
-# TODO: Indicate if pair is 'private'. 
 def get_line_enc_content(enc_line, pwd_key):
     fields = None
+    is_private = False
     enc = None
     dec = None
 
@@ -146,24 +146,28 @@ def get_line_enc_content(enc_line, pwd_key):
 
         if (line.startswith(b"valid+")):
             fields = line.split(b"+")[1:]
+            is_private = False
+        elif (line.startswith(b"Valid+")):
+            fields = line.split(b"+")[1:]
+            is_private = True
     except:
         pass
     
-    return fields, enc, dec
+    return fields, is_private, enc, dec
 
 def main():
     if (not(check_platform(["posix", "nt"]))):
         quit()
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
     
     user_id_group = parser.add_argument_group("User identification", "Options related to user identification.")
-    user_id_group.add_argument("--add-user", metavar="USER", dest="new_user", type=str, nargs=1,
+    user_id_group.add_argument("-a", "--add-user", metavar="USER", dest="new_user", type=str, nargs=1,
                                help="Add a new user and exit.")
     user_id_group.add_argument("-u", "--user", metavar="USER", dest="user", type=str, nargs=1,
                                help="Connect as user and exit.")
     user_id_group.add_argument("-t", "--time", metavar="TIME", dest="time", type=int, nargs=1,
-                               help="Connect, indicate to stay logged in for TIME seconds and exit. (TIME >= 0, default 0 (no limit))")
+                               help="Connect, indicate to stay logged in for TIME seconds and exit.\n(TIME >= 0, default 0 (no limit))")
     user_id_group.add_argument("--dump-user-info", dest="dump_user_info", action="store_const",
                                const=True,
                                help='Display all user-related information and exit.')
@@ -188,16 +192,23 @@ def main():
                                 help="Delete CATEGORY if it exists.")
     category_group.add_argument('-w', '--show-category', dest='to_show',
                                 action="store_const", const=True,
-                                help='Display content of CATEGORY if it exists.')
+                                help='Display content of CATEGORY if it exists.\nThe VALUE of private pairs are replaced by \'****\'.')
+    # category_group.add_argument('--purge', dest='to_purge',
+    #                             action="store_const", const=True,
+    #                             help='Purge content of CATEGORY if it exists.')
 
-    # TODO: Allow multiline values.
     pairs_group = parser.add_argument_group("Pairs", "Options related to pairs.")
     pairs_group.add_argument('-g', '--get-pair', dest='get_pairs', metavar='KEY', type=str, nargs='+',
                              help='Get the KEY-VALUE pair associated with KEY in CATEGORY.')
     pairs_group.add_argument('-r', '--remove-pair', dest='remove_pairs', metavar='KEY', type=str, nargs='+',
                              help='Remove the KEY-VALUE pair in CATEGORY.')
     pairs_group.add_argument('-s', '--set-pair', dest='set_pairs', metavar='KEY:VALUE', type=str, nargs='+',
-                             help='Add a new KEY-VALUE pair in CATEGORY.')
+                             help='Add a new KEY-VALUE pair in CATEGORY.\nIf no VALUE is specified, you will be prompted.\n(By default, the prompt creates a private pair.)')
+    # TODO?: Add a public-pair option?
+    pairs_group.add_argument('-p', '--private-pair', dest='private_pairs', metavar='KEY', type=str, nargs='*',
+                             help='Set pair as private.\nIf a KEY is specified, sets an exisiting pair to private.\nOtherwhise, sets pairs given by --set-pair.')
+    pairs_group.add_argument('-m', '--multi-line', dest='multi_line', action="store_const", const=True,
+                                help='Changes prompt to input a multi-line VALUE.')
 
     argcomplete.autocomplete(parser)
     
@@ -209,12 +220,15 @@ def main():
     to_set = False
     to_get = False
     to_remove = False
+    to_set_new_private = False
+    to_set_existing_private = False
+    is_multiline = False
 
     if (is_arg_set(args.to_create)):
-        to_create = args.to_create
+        to_create = True
 
     if (is_arg_set(args.to_delete)):
-        to_delete = args.to_delete
+        to_delete = True
 
     if (is_arg_set(args.to_show)):
         to_show = True
@@ -227,9 +241,12 @@ def main():
 
     if (is_arg_set(args.remove_pairs)):
         to_remove = True
-        
+
+    if (is_arg_set(args.multi_line)):
+        is_multiline = True
+
     # Default
-    if (sum([to_create, to_delete, to_set, to_get, to_remove]) == 0):
+    if (sum([to_create, to_delete, to_set, to_get, to_remove, is_multiline, is_arg_set(args.private_pairs)]) == 0):
         to_show = True
 
     # user_id_group options checking
@@ -308,22 +325,42 @@ def main():
                     eprint("could not access database.", prog_name=False)
 
     # pairs_group option checking
+    if (is_arg_set(args.private_pairs)):
+        if (len(args.private_pairs) == 0):
+            if (to_set):
+                to_set_new_private = True
+            else:
+                eprint("--private-pair: no key or pair specified.")
+        else:
+            to_set_existing_private = True
+            
     if (to_set):
         kv = [i.split(":") for i in args.set_pairs]
 
         new_pairs = []
         index = 0
         for i in kv:
-            # TODO: Add indicator to set as 'private'.
+            is_private = to_set_new_private
             while ((len(i) < 2) or (i[1] == "")):
-                i = [i[0], getpass.getpass(i[0] + ":")]
+                if (not(is_multiline)):
+                    i = [i[0], getpass.getpass(i[0] + ":")]
+                    is_private = True
+                else:
+                    all_lines = []
+                    line = input(i[0] + ":")
+                    
+                    while line:
+                        all_lines.append(line)
+                        line = input()
+
+                    i = [i[0], ("\n" + " " * (len(i[0]) + 1)).join(all_lines)]
 
             if (len(i) > 2):
                 eprint("malformed KEY:VALUE pair '%s'." % ":".join(i))
             elif (i[0] == ""):
                 eprint("VALUE '%s' is missing a KEY." % i[1])
             else:
-                new_pairs.append(i)
+                new_pairs.append([i[0], i[1], is_private])
                 
             index += 1
         args.set_pairs = new_pairs
@@ -334,7 +371,10 @@ def main():
     if (to_remove):
         args.remove_pairs = list(OrderedDict.fromkeys(args.remove_pairs))
 
-    is_accessing_categories = (sum([to_get, to_remove, to_set, to_show]) != 0)
+    if (to_set_existing_private):
+        args.private_pairs = list(OrderedDict.fromkeys(args.private_pairs))
+
+    is_accessing_categories = sum([to_get, to_remove, to_set, to_show, to_set_existing_private])
 
     if (is_accessing_categories and (len(args.categories) == 0)):
         eprint("no category specified.")
@@ -359,10 +399,12 @@ def main():
             if (to_remove):
                 remove_pairs = args.remove_pairs[:]
 
-            for enc_line in encrypted_file:
-                fields, enc, dec = get_line_enc_content(enc_line, pwd_key)
+            if (to_set_existing_private):
+                private_pairs = args.private_pairs[:]
 
-                # NOTE: Allow fake pairs.
+            for enc_line in encrypted_file:
+                fields, is_private, enc, dec = get_line_enc_content(enc_line, pwd_key)
+
                 if (not(fields) is None):
                     skip = False
 
@@ -383,56 +425,84 @@ def main():
                         is_category_modified = True
                         continue
                                 
-                    all_enc_pairs[fields[0]] = fields[1]
+                    all_enc_pairs[fields[0]] = [fields[1], is_private]
+                    
+                # NOTE: Allow fake pairs.
                 else:
-                    all_old_lines.append(fields)
+                    all_old_lines.append(enc_line)
 
-            # TODO?: Differentiate between get and remove error messages.
             if (to_get):
                 for key in get_pairs:
-                    eprint("category '%s': invalid key '%s'." % (category, key))
+                    eprint("--get-pair: invalid key '%s'." % key)
 
             if (to_remove):
                 for key in remove_pairs:
-                    eprint("category '%s': invalid key '%s'." % (category, key))
+                    eprint("--remove-pair: invalid key '%s'." % key)
 
-            if (not(to_get)):
-                salt = os.urandom(AES.block_size)
-            
-                enc = AES.new(pwd_key)
-            
-                if (to_set):
-                    for i in args.set_pairs:
-                        all_enc_pairs[enc.encrypt(pad(i[0], 16))] = enc.encrypt(pad(i[1], 16))
 
+            salt = os.urandom(AES.block_size)
+            
+            enc = AES.new(pwd_key)
+            
+            if (to_set):
+                for i in args.set_pairs:
+                    enc_k = enc.encrypt(pad(i[0], 16))
+                    enc_v = enc.encrypt(pad(i[1], 16))
+
+                    # NOTE: Keep it private if it already is.
+                    if (enc_k in all_enc_pairs):
+                        all_enc_pairs[enc_k] = [enc_v, all_enc_pairs[enc_k][1] or i[2]]
+                    else:
+                        all_enc_pairs[enc_k] = [enc_v, i[2]]
+                    
+                    is_category_modified = True
+                        
+            if (to_set_existing_private):
+                for i in private_pairs[:]:
+                    enc_k = enc.encrypt(pad(i, 16))
+                    
+                    if (enc_k in all_enc_pairs):
+                        all_enc_pairs[enc_k][1] = True
+                        private_pairs.remove(i)
+                    
                         is_category_modified = True
 
-                if (is_category_modified):
-                    encrypted_file.seek(0, os.SEEK_SET)
-                    encrypted_file.readline()
-                    encrypted_file.readline()
+            if (to_set_existing_private):
+                for key in private_pairs:
+                    eprint("--private-pair: invalid key '%s'." % key)
+                    
+            if (is_category_modified):
+                encrypted_file.seek(0, os.SEEK_SET)
+                encrypted_file.readline()
+                encrypted_file.readline()
                 
-                    for l in all_old_lines:
-                        encrypted_file.write(l)
+                for l in all_old_lines:
+                    encrypted_file.write(l)
                         
-                for enc_k, enc_v in all_enc_pairs.items():
-                    if (is_category_modified):
-                        # TODO: add indicator if it's private (uppercase V?).
-                        line = pad(b"valid+" +
-                                   enc_k + b"+" + enc_v,
-                                   16, isBytes = True)
+                for enc_k, [enc_v, is_private] in all_enc_pairs.items():
+                    if (is_private):
+                        integrity_check = b"Valid"
+                    else:
+                        integrity_check = b"valid"
 
-                        enc_line = base64.b64encode(salt + enc.encrypt(line), altchars=b'-_')
+                    line = pad(integrity_check + b"+" +
+                               enc_k + b"+" + enc_v,
+                               16, isBytes = True)
 
-                        encrypted_file.write(enc_line + b"\n")
+                    enc_line = base64.b64encode(salt + enc.encrypt(line), altchars=b'-_')
 
-                    # TODO: If pair is 'private', show '****' instead.
-                    if (to_show):
+                    encrypted_file.write(enc_line + b"\n")
+
+                encrypted_file.truncate()
+                
+            if (to_show):
+                for enc_k, [enc_v, is_private] in all_enc_pairs.items():
+                    if (is_private):
+                        print("%s:****" % unpad(dec.decrypt(enc_k), 16, isBytes = True).decode())
+                    else:
                         print("%s:%s" % (unpad(dec.decrypt(enc_k), 16, isBytes = True).decode(),
                                          unpad(dec.decrypt(enc_v), 16, isBytes = True).decode()))
-
-                if (is_category_modified):
-                    encrypted_file.truncate()
+                        
             encrypted_file.close()
             
             if (to_get or to_show):
