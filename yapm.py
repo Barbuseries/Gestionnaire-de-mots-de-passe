@@ -60,7 +60,11 @@ def delete_category(name, public_key):
 
     try:
         os.remove(file_path)
-        os.remove(os.path.join(YAPM_USER_CATEGORIES_DIRECTORY, name))
+        
+        categoryname_path = os.path.join(YAPM_USER_CATEGORIES_DIRECTORY, name)
+        
+        if (os.path.exists(categoryname_path)):
+            os.remove(categoryname_path)
     except:
         return False, CategoryStatus.inaccessible
     
@@ -130,13 +134,13 @@ def unpad(m, r = True, isBytes = False):
     return m[(start_pad + 1):]
 
 def get_line_enc_content(enc_line, pwd_key):
-    fields = None
+    enc_k, enc_v, enc_t = None, None, None
     is_private = False
     enc = None
     dec = None
 
     try:
-        enc_line = base64.b64decode(enc_line, altchars=b'-_')
+        enc_line = unpad(base64.b64decode(enc_line, altchars=b'-_'), isBytes = True)
                 
         salt = enc_line[:AES.block_size]
 
@@ -147,18 +151,22 @@ def get_line_enc_content(enc_line, pwd_key):
         enc = AES.new(pwd_key)
         dec = AES.new(pwd_key)
 
-        line = unpad(dec.decrypt(enc_line[AES.block_size:]), 16, isBytes = True)
+        line = dec.decrypt(enc_line[AES.block_size:])
 
-        if (line.startswith(b"valid+")):
-            fields = line.split(b"+")[1:]
+        if (line.startswith(base64.b64encode(b"valid") + b"$")):
             is_private = False
-        elif (line.startswith(b"Valid+")):
-            fields = line.split(b"+")[1:]
+        elif (line.startswith(base64.b64encode(b"Valid") + b"$")):
             is_private = True
+        else:
+            return None, None, None, None, None, None
+        
+        fields = line.split(b"$")[1:]
+        enc_k, enc_v = [base64.b64decode(f) for f in fields[:2]]
+        enc_t = [base64.b64decode(f) for f in fields[2:]]
     except:
         pass
     
-    return fields, is_private, enc, dec
+    return enc_k, enc_v, enc_t, is_private, enc, dec
 
 def remove_duplicates(thing):
     if (not(thing) is None):
@@ -223,7 +231,7 @@ def main():
                              help='Get the KEY-VALUE pair associated with KEY in CATEGORY.')
     pairs_group.add_argument('-r', '--remove-pair', dest='remove_pairs', metavar='KEY', type=str, nargs='+',
                              help='Remove the KEY-VALUE pair in CATEGORY.')
-    pairs_group.add_argument('-s', '--set-pair', dest='set_pairs', metavar='KEY:VALUE', type=str, nargs='+',
+    pairs_group.add_argument('-s', '--set-pair', dest='set_pairs', metavar='KEY:VALUE:[:TAG]', type=str, nargs='+',
                              help='Add a new KEY-VALUE pair in CATEGORY.\nIf no VALUE is specified, you will be prompted.\n(By default, the prompt creates a private pair.)')
     
     pair_privacy_group = pairs_group.add_mutually_exclusive_group()
@@ -234,19 +242,37 @@ def main():
     pairs_group.add_argument('-m', '--multiline', dest='multi_line', action="store_const", const=True,
                              help='Changes prompt to input a multiline VALUE.')
 
+    tags_group = parser.add_argument_group("Tags", "Options related to tags.")
+    tags_group.add_argument('--get-tag', dest='get_tags', metavar='TAG', type=str, nargs='+',
+                            help='Get the KEY-VALUE pairs associated with TAG in CATEGORY.')
+    tags_group.add_argument('--remove-tag', dest='remove_tags', metavar='TAG[:KEY]', type=str, nargs='+',
+                            help='Remove TAG from CATEGORY (only from KEY if it\'s specified).')
+    tags_group.add_argument('--set-tag', dest='set_tags', metavar='TAG:KEY', type=str, nargs='+',
+                            help='Associate the KEY-VALUE pair to TAG in CATEGORY.')
+    # TODO; Tomorrow, because I'm tired....
+    # tags_group.add_argument('--add-tag', dest='add_tags', metavar='TAG:KEY', type=str, nargs='+',
+    #                         help='Add TAG to the KEY-VALUE pair CATEGORY.')
+
     argcomplete.autocomplete(parser)
     
     args = parser.parse_args()
 
     to_create = False
     to_delete = False
+    
     to_show = False
     to_set = False
     to_get = False
     to_remove = False
+    
     to_set_privacy = False
     to_set_new_privacy = False
     to_set_existing_privacy = False
+
+    to_get_tag = False
+    to_remove_tag = False
+    to_set_tag = False
+    
     is_multiline = False
 
     privacy_pairs = []
@@ -280,6 +306,15 @@ def main():
             privacy_status = PairStatus.public
             privacy_pairs = args.public_pairs
 
+    if (is_arg_set(args.get_tags)):
+        to_get_tag = True
+
+    if (is_arg_set(args.remove_tags)):
+        to_remove_tag = True
+
+    if (is_arg_set(args.set_tags)):
+        to_set_tag = True
+
     if (is_arg_set(args.multi_line)):
         is_multiline = True
 
@@ -287,12 +322,22 @@ def main():
     #       would require to only verify keys (and I can not be
     #       bothered to do it).
     args.categories = remove_duplicates(args.categories)
+    
     args.get_pairs = remove_duplicates(args.get_pairs)
     args.remove_pairs = remove_duplicates(args.remove_pairs)
+    
     privacy_pairs = remove_duplicates(privacy_pairs)
 
+    args.get_tags = remove_duplicates(args.get_tags)
+
+    if (is_arg_set(args.get_tags)):
+        args.get_tags = sorted(args.get_tags)
+        
+    args.remove_tags = remove_duplicates(args.remove_tags)
+
     # Default
-    if (sum([to_create, to_delete, to_set, to_get, to_remove, is_multiline, to_set_privacy]) == 0):
+    if (sum([to_create, to_delete, to_set, to_get, to_remove, is_multiline, to_set_privacy,
+             to_get_tag, to_remove_tag, to_set_tag]) == 0):
         to_show = (len(args.categories) > 0)
 
     # user_id_group options checking
@@ -348,7 +393,8 @@ def main():
             to_set_existing_privacy = True
 
     # NOTE: If at least one of them is set, we need to read the file.
-    is_accessing_categories = sum([to_get, to_remove, to_set, to_show, to_set_privacy])
+    is_accessing_categories = sum([to_get, to_remove, to_set, to_show, to_set_privacy,
+                                   to_get_tag, to_remove_tag, to_set_tag])
 
     if (is_accessing_categories and (len(args.categories) == 0)):
         eprint("no category specified.")
@@ -426,14 +472,32 @@ def main():
                     # NOTE: Indentation is added, it may be removed later on...
                     i = [i[0], ("\n" + " " * (len(i[0]) + 1)).join(all_lines)]
 
-            if (len(i) > 2):
-                eprint("malformed KEY:VALUE pair '%s'." % ":".join(i))
+            if (len(i) > 3):
+                eprint("malformed KEY:VALUE[:TAG] pair '%s'." % ":".join(i))
             elif (i[0] == ""):
                 eprint("VALUE '%s' is missing a KEY." % i[1])
             else:
-                new_pairs.append([i[0], i[1], is_private])
+                if (len(i) < 3):
+                    i.append("None")
+                new_pairs.append([i[0], i[1], is_private, i[2]])
                 
         args.set_pairs = new_pairs
+
+    if (to_set_tag):
+        tk = [i.split(":") for i in args.set_tags]
+
+        new_tags = []
+        for i in tk:
+            if (len(i) > 2):
+                eprint("malformed TAG:KEY pair '%s'." % ":".join(i))
+            elif (i[0] == ""):
+                eprint("KEY '%s' is missing a TAG." % i[1])
+            elif (i[1] == ""):
+                eprint("TAG '%s' is missing a KEY." % i[0])
+            else:
+                new_tags.append([sorted(i[0].split(",")), i[1]])
+                
+        args.set_tags = new_tags
 
     if (to_set_privacy and (len(privacy_pairs) == 0) and not(to_set)):
         if (privacy_status == PairStatus.private):
@@ -460,24 +524,54 @@ def main():
             # NOTE: To allow removing keys already seen across categories.
             get_pairs = copy_list(args.get_pairs)
             remove_pairs = copy_list(args.remove_pairs)
+            
             privacy_pairs = copy_list(privacy_pairs)
+            
+            get_tags = copy_list(args.get_tags)
+            remove_tags = copy_list(args.remove_tags)
 
             for enc_line in encrypted_file:
-                fields, is_private, enc, dec = get_line_enc_content(enc_line, pwd_key)
+                enc_k, enc_v, enc_t, is_private, enc, dec = get_line_enc_content(enc_line, pwd_key)
 
-                if (not(fields) is None):
+                if (not(enc_k) is None):
                     skip = False
 
                     if (to_get):
                         for key in copy_list(get_pairs):
-                            
-                            if (encrypt_pair_element(enc, key) == fields[0]):
-                                print("%s:%s" % (key, decrypt_pair_element(dec, fields[1])))
+                            if (encrypt_pair_element(enc, key) == enc_k):
+                                print("%s:%s" % (key, decrypt_pair_element(dec, enc_v)))
                                 get_pairs.remove(key)
-                    
+
+                    # TODO: Make tags separated by commas (',') be additive (all must be included).
+                    if (to_get_tag):
+                        if (any(encrypt_pair_element(enc, tag) in enc_t for tag in copy_list(args.get_tags))):
+                            print("%s:%s" % (decrypt_pair_element(dec, enc_k),
+                                             decrypt_pair_element(dec, enc_v)))
+
+                    if (to_remove_tag):
+                        for tag in remove_tags[:]:
+                            tag_key = tag.split(":")
+
+                            # No key specified.
+                            if (len(tag_key) == 1):
+                                enc_given_tag = encrypt_pair_element(enc, tag)
+                                
+                                if (enc_given_tag in enc_t):
+                                    enc_t.remove(enc_given_tag)
+                                    is_category_modified = True
+                            # Key specified.
+                            elif ((len(tag_key) == 2) and
+                                  (encrypt_pair_element(enc, tag_key[1]) == enc_k)):
+                                enc_given_tag = encrypt_pair_element(enc, tag_key[0])
+                                
+                                if (enc_given_tag in enc_t):
+                                    enc_t.remove(enc_given_tag)
+                                    is_category_modified = True
+                                    remove_tags.remove(tag)
+
                     if (to_remove):
                         for key in remove_pairs[:]:
-                            if (encrypt_pair_element(enc, key) == fields[0]):
+                            if (encrypt_pair_element(enc, key) == enc_k):
                                 skip = True
                                 remove_pairs.remove(key)
 
@@ -485,7 +579,7 @@ def main():
                         is_category_modified = True
                         continue
                                 
-                    all_enc_pairs[fields[0]] = [fields[1], is_private]
+                    all_enc_pairs[enc_k] = [enc_v, is_private, enc_t]
                     
                 # NOTE: Allow fake pairs.
                 else:
@@ -495,9 +589,19 @@ def main():
                 for key in get_pairs:
                     eprint("--get-pair: invalid key '%s'." % key)
 
+            # TODO: Store if at least one found.
+            # if (to_get_tag):
+            #     for tag in get_tags:
+            #         eprint("--get-tag: invalid tag '%s'." % tag)
+
             if (to_remove):
                 for key in remove_pairs:
                     eprint("--remove-pair: invalid key '%s'." % key)
+
+            # TODO: Store if at least one found.
+            # if (to_remove_tag):
+            #     for tag in remove_tags:
+            #         eprint("--remove-tag: invalid tag '%s'." % tag)
 
             salt = os.urandom(AES.block_size)            
             enc = AES.new(pwd_key)
@@ -507,13 +611,26 @@ def main():
                 for i in args.set_pairs:
                     enc_k = encrypt_pair_element(enc, i[0])
                     enc_v = encrypt_pair_element(enc, i[1])
+                    
+                    # Separate each tag and encrypt them invidually. 
+                    enc_t = [encrypt_pair_element(enc, tag) for tag in i[3].split(",")]
 
                     if ((enc_k in all_enc_pairs) and (privacy_status == PairStatus.same_as_before)):
-                        all_enc_pairs[enc_k] = [enc_v, all_enc_pairs[enc_k][1]]
+                        all_enc_pairs[enc_k] = [enc_v, all_enc_pairs[enc_k][1], enc_t]
                     else:
-                        all_enc_pairs[enc_k] = [enc_v, i[2]]
+                        all_enc_pairs[enc_k] = [enc_v, i[2], enc_t]
                     
                     is_category_modified = True
+                    
+            if (to_set_tag):
+                for tags, key in args.set_tags:
+                    enc_k = encrypt_pair_element(enc, key)
+
+                    if (enc_k in all_enc_pairs):
+                        all_enc_pairs[enc_k][2] = [encrypt_pair_element(enc, t) for t in tags]
+                        is_category_modified = True
+                    else:
+                        eprint("--set-tag: invalid key '%s'." % key)
 
             # NOTE: Change privacy of given pairs.
             if (to_set_existing_privacy):
@@ -542,14 +659,17 @@ def main():
                 for l in all_old_lines:
                     encrypted_file.write(l)
                         
-                for enc_k, [enc_v, is_private] in all_enc_pairs.items():
+                for enc_k, [enc_v, is_private, enc_t] in all_enc_pairs.items():
                     if (is_private):
                         integrity_check = b"Valid"
                     else:
                         integrity_check = b"valid"
 
-                    line = pad(integrity_check + b"+" +
-                               enc_k + b"+" + enc_v,
+                    if (len(enc_t) == 0):
+                        enc_t = [encrypt_pair_element(enc, "None")]
+
+                    line = pad(base64.b64encode(integrity_check) + b"$" + base64.b64encode(enc_k) + b"$" +\
+                               base64.b64encode(enc_v) + b"$" + b"$".join([base64.b64encode(t) for t in enc_t]),
                                16, isBytes = True)
 
                     enc_line = base64.b64encode(salt + enc.encrypt(line), altchars=b'-_')
@@ -561,13 +681,13 @@ def main():
             encrypted_file.close()
                 
             if (to_show):
-                for enc_k, [enc_v, is_private] in all_enc_pairs.items():
+                for enc_k, [enc_v, is_private, enc_t] in all_enc_pairs.items():
                     if (is_private):
-                        print("%s:****" % decrypt_pair_element(dec, enc_k))
+                        print("%s:**** (Tags: %s)" % (decrypt_pair_element(dec, enc_k), [decrypt_pair_element(dec, i) for i in enc_t]))
                     else:
-                        print("%s:%s" % (decrypt_pair_element(dec, enc_k), decrypt_pair_element(dec, enc_v)))
+                        print("%s:%s (Tags: %s)" % (decrypt_pair_element(dec, enc_k), decrypt_pair_element(dec, enc_v), [decrypt_pair_element(dec, i) for i in enc_t]))
 
-            if (to_get or to_show):
+            if (to_get or to_show or to_get_tag):
                 print("")
 
 if __name__ == "__main__":
