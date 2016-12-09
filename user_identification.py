@@ -294,7 +294,7 @@ def prompt_create_new_user(login = None):
     return True
 
 def generate_user_rsa(login, password):
-    pwd_hash = HMAC.new(password.encode("utf-8")).digest()
+    pwd_hash = SHA256.new(password.encode("utf-8")).digest()
     rng = PRNG(login.encode("utf-8") + pwd_hash)
 
     return RSA.generate(1024, rng)
