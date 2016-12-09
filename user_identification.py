@@ -293,7 +293,7 @@ def prompt_create_new_user(login = None):
     
     return True
 
-def generate_user_rsa(login, password):
+def generate_rsa(login, password):
     pwd_hash = SHA256.new(password.encode("utf-8")).digest()
     rng = PRNG(login.encode("utf-8") + pwd_hash)
 
@@ -305,8 +305,9 @@ def get_file_dummy_check(filename, directory = "."):
         file_path = os.path.join(directory, filename)
         
         with open(file_path, "r") as enc_file:
-            first_line = enc_file.readline()[:-1]
-        return first_line
+            check = enc_file.readline()[:-1].split("User check = ")[1]
+            print(check)
+        return check
     except:
         return None
 
@@ -398,7 +399,7 @@ def connect_as_user(login = None, time_limit = 0):
     valid_user, login, password = prompt_user(login)
     
     if (valid_user):
-        key = generate_user_rsa(login, password)
+        key = generate_rsa(login, password)
         display_non_dummy_files(key)
 
         cookie = get_yapm_file(YAPM_CURRENT_USER_COOKIE, "wb+")

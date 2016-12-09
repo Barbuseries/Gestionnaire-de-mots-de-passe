@@ -7,9 +7,6 @@ from user_identification import *
 from enum import Enum
 from collections import OrderedDict
 
-# TODO?: Instead of just saving hash of password key, create
-#        public/private RSA keys to sign file.
-
 class CategoryStatus(Enum):
     do_not_exist = 0
     exist = 1
@@ -95,6 +92,12 @@ class Pair:
 def is_arg_set(arg):
     return not(arg is None)
 
+def category_sign(category_key, content_list):
+    # NOTE: For RSA only, K is not used.
+    # K = CUN.getRandomNumber(128, os.urandom)
+    K = ""
+    return str(category_key.sign(SHA256.new(b"\n".join(content_list)).hexdigest().encode(), K)).encode()
+
 # FIXME: RSA encryption returns a filename way too long.
 #        Find shorter way of encrypting.
 #        See int_to_cust and cust_to_int in user_identification.py.
@@ -104,24 +107,41 @@ def create_category(name, public_key, password, add_to_completion = True):
         return False, CategoryStatus.exist
     
     final_name = int_to_cust(int(public_encrypt(public_key, name), 16))
-
+    file_path = os.path.join(YAPM_FILE_DB, "." + final_name)
+    
     try:
-        file_path = os.path.join(YAPM_FILE_DB, "." + final_name)
-
-        # TODO: Change check to just be name? (+ seed)
-        enc_check = public_encrypt(public_key, generate_dummy_check(name))
+        
     
         with open(file_path, "wb+") as category:
-            category.write(enc_check.encode() + b"\n")
-        
+            # TODO: Change check to just be name? (+ seed)
+            enc_check = public_encrypt(public_key, generate_dummy_check(name))
+            
+            category_key = generate_rsa(name, password)
+
             salt = os.urandom(16).hex().encode()
             pwd_keyhash = password_hash(password, salt)
-            category.write(salt + b"$" + pwd_keyhash.encode() + b"\n")
+        
+            lines = []
+            lines.append(b"User check = " + enc_check.encode())
+            lines.append(b"Password hash = " + salt + b"$" + pwd_keyhash.encode())
+            lines.append(b"Content = ")
+            
+            signature = category_sign(category_key, lines)
+
+            for l in lines[:-1]:
+                category.write(l + b"\n")
+                
+            category.write(b"Signature = " + signature + b"\n")
+
+            category.write(lines[-1] + b"\n")
 
         open(os.path.join(YAPM_USER_CATEGORIES_DIRECTORY, name), "w+").close()
 
         return True, CategoryStatus.exist
     except Exception as e:
+        if (os.path.exits(file_path)):
+            os.remove(file_path)
+            
         return False, CategoryStatus.inaccessible
 
 def delete_category(name, public_key):
@@ -142,6 +162,9 @@ def delete_category(name, public_key):
     
     return True, CategoryStatus.do_not_exist
 
+def get_file_bytes_after(f, start, end = b"\n"):
+    return f.readline().split(start)[1].split(end)[0]
+
 # NOTE: Do not forget to close it.
 def open_category(name, public_key, flags):
     file_path = get_file_from_category(name, public_key)
@@ -149,30 +172,47 @@ def open_category(name, public_key, flags):
     if (file_path is None):
         eprint("failed to access category '%s': does not exist." % name)
         return False, None, None
-    
-    encrypted_file = open(file_path, flags)
-    # User ownership check.
-    encrypted_file.readline()
-    
-    salt, pwd_keyhash = encrypted_file.readline()[:-1].split(b"$")
-    pwd_key = password_key(getpass.getpass(name + "'s password:"), salt)
 
-    if (password_keyhash(pwd_key, salt).encode() == pwd_keyhash):
-        line = encrypted_file.readline()
+    try:
+        encrypted_file = open(file_path, flags)
 
-        if (len(line) == 0):
-            return True, encrypted_file, [], pwd_key
-        else:
-            salt, enc_content = line[:-1].split(b"$")
-            salt = base64.b64decode(salt)
-            enc_content = base64.b64decode(enc_content)
+        check = encrypted_file.readline()[:-1]
+
+        salt, pwd_keyhash = get_file_bytes_after(encrypted_file, b"Password hash = ").split(b"$")
+        password = getpass.getpass(name + "'s password:")
+        pwd_key = password_key(password, salt)
+
+        if (password_keyhash(pwd_key, salt).encode() == pwd_keyhash):
+            # Signature.
+            category_key = generate_rsa(name, password)
+            signature = make_tuple(get_file_bytes_after(encrypted_file, b"Signature = ").decode())
+
+            content = get_file_bytes_after(encrypted_file, b"Content = ")
+
+            toto = b"\n".join([check,
+                               b"Password hash = " + salt + b"$" + pwd_keyhash,
+                               b"Content = " + content])
+
             
-            dec = AES.new(pwd_key, AES.MODE_CBC, IV=salt)
+            if (category_key.publickey().verify(SHA256.new(toto).hexdigest().encode(), signature)):
+                if (len(content) == 0):
+                    return True, encrypted_file, [], pwd_key, category_key
+                else:
+                    salt, enc_content = content.split(b"$")
+                    salt = base64.b64decode(salt)
+                    enc_content = base64.b64decode(enc_content)
 
-            return True, encrypted_file, unpad(dec.decrypt(enc_content), isBytes = True).split(b"\n"), pwd_key
+                    dec = AES.new(pwd_key, AES.MODE_CBC, IV=salt)
 
+                    return True, encrypted_file, unpad(dec.decrypt(enc_content), isBytes = True).split(b"\n"), pwd_key, category_key
+            else:
+                eprint("category '%s' was modified outside this program!" % name)
+    except Exception as e:
+        print(e)
+    
     print("Access denied.")
-    return False, None, None
+        
+    return False, None, None, None, None
 
 def CategoryCompleter(prefix, **kwargs):
     return (c for c in os.listdir(YAPM_USER_CATEGORIES_DIRECTORY))
@@ -555,7 +595,7 @@ def main():
             success, status = create_category(category, public_key, category_pwd)
             
             if (not(success)):
-                eprint("failed to create category '%s': could not access database." % category, end="")
+                eprint("failed to create category '%s': could not access database." % category)
                 continue
                     
     if (to_delete):
@@ -664,11 +704,11 @@ def main():
         for category in args.categories:
             is_category_modified = False
             all_enc_pairs = []
-            all_old_lines = []
+            # all_old_lines = []
 
             # NOTE: As check was moved above, it should always
             # succeed. Better be sure anyway...
-            success, encrypted_file, enc_content, pwd_key = open_category(category, public_key, "r+b")
+            success, encrypted_file, enc_content, pwd_key, category_key = open_category(category, public_key, "r+b")
 
             if (not(success)):
                 continue
@@ -728,10 +768,11 @@ def main():
                         continue
                                 
                     all_enc_pairs.append(pair)
-                    
-                # NOTE: Allow fake pairs.
-                else:
-                    all_old_lines.append(enc_line)
+
+                # TODO: Just use different integrity check.
+                # # NOTE: Allow fake pairs.
+                # else:
+                #     all_old_lines.append(enc_line)
 
             if (to_get):
                 for key in get_pairs:
@@ -823,22 +864,40 @@ def main():
                     
             if (is_category_modified):
                 encrypted_file.seek(0, os.SEEK_SET)
-                encrypted_file.readline()
+
+                check = encrypted_file.readline()[:-1]
+                pwd_hash = encrypted_file.readline()[:-1]
+
+                # Old signature.
                 encrypted_file.readline()
                 
-                for l in all_old_lines:
-                    encrypted_file.write(l)
+                # for l in all_old_lines:
+                #     encrypted_file.write(l)
 
                 salt = os.urandom(AES.block_size)
                 enc = AES.new(pwd_key, AES.MODE_CBC, IV=salt)
 
                 enc_content = b"\n".join([pair.encrypt() for pair in all_enc_pairs])
 
-                encrypted_file.write(base64.b64encode(salt) +\
-                                     b"$" +\
-                                     base64.b64encode(enc.encrypt(pad(enc_content,
-                                                                      16, isBytes = True))) +\
-                                     b"\n")
+                content = base64.b64encode(salt) +\
+                          b"$" +\
+                          base64.b64encode(enc.encrypt(pad(enc_content,
+                                                           16, isBytes = True)))
+
+                lines = [check,
+                         pwd_hash,
+                         b"Content = " + content]
+
+                signature = category_sign(category_key, lines)
+
+                encrypted_file.seek(0, os.SEEK_SET)
+                # Skip user check.
+                encrypted_file.readline()
+                # And password hash.
+                encrypted_file.readline()
+
+                encrypted_file.write(b"Signature = " + signature + b"\n")
+                encrypted_file.write(b"Content = " + content + b"\n")
                 
                 encrypted_file.truncate()
 
