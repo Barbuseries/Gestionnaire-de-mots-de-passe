@@ -27,7 +27,7 @@ class Pair:
         
         self.salt = salt
 
-        # NOTE: Generate an AES key depending on the password for the
+        # Generate an AES key depending on the password for the
         # category and a salt.
         self.encryption_function = AES.new(bcrypt.kdf(password = pwd_key,
                                                       salt = salt,
@@ -208,14 +208,12 @@ def open_category(name, public_key, flags):
             else:
                 eprint("category '%s' was modified outside this program!" % name)
     except Exception as e:
-        print(e)
-    
+        pass
+
+    time.sleep(ACCESS_DENIED_WAIT_DELAY)
     print("Access denied.")
         
     return False, None, None, None, None
-
-def CategoryCompleter(prefix, **kwargs):
-    return (c for c in os.listdir(YAPM_USER_CATEGORIES_DIRECTORY))
 
 # NOTE: pad wth '#' until length of m is a multiple of s.
 # If r, pad right, else, pad left.
@@ -355,11 +353,23 @@ def get_pair_from_key(all_pairs, key):
 
     return None
 
+
+def CategoryCompleter(prefix, **kwargs):
+    return (c for c in os.listdir(YAPM_USER_CATEGORIES_DIRECTORY))
+
 def main():
     if (not(check_platform(["posix", "nt"]))):
         sys.exit(1)
 
-    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
+    description="Personal data manager.\n\
+Stores KEY-VALUE pairs in CATEGORIES owned by USERs.\n\
+Each CATEGORY needs a password to be accessed.\n\
+A pair can have an unlimited amount of TAGs.\n\n\
+Accessing a CATEGORY is a simple as:\n yapm CATEGORY\n\n\
+If no user is logged in, you will be prompted to do so."
+        
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter,
+                                     description=description)
     
     user_id_group = parser.add_argument_group("User identification", "Options related to user identification.")
     user_id_group.add_argument("--add-user", metavar="USER", dest="new_user", type=str, nargs=1,
@@ -371,6 +381,9 @@ def main():
     user_id_group.add_argument("--dump-user-info", dest="dump_user_info", action="store_const",
                                const=True,
                                help='Display all user-related information and exit.')
+    user_id_group.add_argument("-l", "--list-categories", dest="list_categories", action="store_const",
+                               const=True,
+                               help='Display all user\'s categories and exit.')
     user_id_group.add_argument("-k", "--stop-session", dest="disconnect", action="store_const",
                                const=True,
                                help='Stop current user session and exit.')
@@ -378,9 +391,6 @@ def main():
     category_group = parser.add_argument_group("Categories", "Options related to categories.")
     category_group.add_argument("categories", metavar='CATEGORY', type=str, nargs='*',
                                 help="Operate on CATEGORY.").completer = CategoryCompleter
-    category_group.add_argument("-l", "--list-categories", dest="list_categories", action="store_const",
-                                const=True,
-                                help='Display all user\'s categories and exit.')
     category_exclusive = category_group.add_mutually_exclusive_group()
     category_exclusive.add_argument("-c", "--create-category", dest="to_create",
                                     action="store_const", const=True,
@@ -397,23 +407,23 @@ def main():
     # category_group.add_argument('--purge', dest='to_purge',
     #                             action="store_const", const=True,
     #                             help='Purge content of CATEGORY if it exists.')
-    pairs_group = parser.add_argument_group("Pairs", "Options related to pairs.")
+    pairs_group = parser.add_argument_group("Pairs", "Options related to pairs.\n  (TAG => TAG[,TAG, ...])")
     pairs_group.add_argument('--get-pair', dest='get_pairs', metavar='KEY', type=str, nargs='+',
                              help='Get the KEY-VALUE pair associated with KEY in CATEGORY.')
     pairs_group.add_argument('--remove-pair', dest='remove_pairs', metavar='KEY', type=str, nargs='+',
                              help='Remove the KEY-VALUE pair in CATEGORY.')
-    pairs_group.add_argument('--set-pair', dest='set_pairs', metavar='KEY:VALUE:[:TAG[,TAG ...]]', type=str, nargs='+',
-                             help='Add a new KEY-VALUE pair in CATEGORY.\nIf no VALUE is specified, you will be prompted.\n(By default, the prompt creates a private pair.)')
+    pairs_group.add_argument('--set-pair', dest='set_pairs', metavar='KEY:VALUE:TAG', type=str, nargs='+',
+                             help='Add a new KEY-VALUE pair in CATEGORY.\nIf no VALUE is specified, you will be prompted.\n(This will set the pair as private)')
     
     pair_privacy_group = pairs_group.add_mutually_exclusive_group()
-    pair_privacy_group.add_argument('-p', '--private-pair', dest='private_pairs', metavar='KEY', type=str, nargs='*',
+    pair_privacy_group.add_argument('-p', '--set-private', dest='private_pairs', metavar='KEY', type=str, nargs='*',
                                     help='Set pair as private.\nIf a KEY is specified, sets an exisiting pair to private.\nOtherwhise, sets pair given by --set-pair.')
-    pair_privacy_group.add_argument('-P', '--public-pair', dest='public_pairs', metavar='KEY', type=str, nargs='*',
+    pair_privacy_group.add_argument('-P', '--set-public', dest='public_pairs', metavar='KEY', type=str, nargs='*',
                                     help='Set pair as public.\nIf a KEY is specified, sets an exisiting pair to public.\nOtherwhise, sets pair given by --set-pair.\n(Default)')
     pairs_group.add_argument('-m', '--multiline', dest='multi_line', action="store_const", const=True,
                              help='Changes prompt to input a multiline VALUE.')
 
-    tags_group = parser.add_argument_group("Tags", "Options related to tags.\n  (TAG => TAG[,TAG ...])\n  (KEY => KEY[,KEY ...])")
+    tags_group = parser.add_argument_group("Tags", "Options related to tags.\n  (TAG => TAG[,TAG, ...])\n  (KEY => KEY[,KEY, ...])")
     tags_group.add_argument('-g', '--get-tag', dest='get_tags', metavar='TAG', type=str, nargs='+',
                             help='Get the KEY-VALUE pairs associated with TAG in CATEGORY.')
     tags_group.add_argument('-r', '--remove-tag', dest='remove_tags', metavar='TAG[:KEY]', type=str, nargs='+',
@@ -423,7 +433,7 @@ def main():
     tags_group.add_argument('-a', '--add-tag', dest='add_tags', metavar='TAG:KEY', type=str, nargs='+',
                             help='Add TAG to the KEY-VALUE pair CATEGORY.')
 
-    argcomplete.autocomplete(parser)
+    argcomplete.autocomplete(parser, always_complete_options="long")
     
     args = parser.parse_args()
 
@@ -566,7 +576,7 @@ def main():
         else:
             to_set_existing_privacy = True
 
-    # NOTE: If at least one of them is set, we need to read the file.
+    # If at least one of them is set, we need to read the file.
     is_accessing_categories = any([to_get, to_remove, to_set, to_show, to_set_privacy,
                                    to_get_tag, to_remove_tag, to_set_tag, to_add_tag])
 
@@ -610,7 +620,7 @@ def main():
                 else:
                     eprint("could not access database.", prog_name=False)
                     
-        # NOTE: Everything below is done on categories anyway.
+        # Everything below is done on categories anyway.
         sys.exit(0)
 
     for category in copy_list(args.categories):
@@ -621,6 +631,10 @@ def main():
             args.categories.remove(category)
                     
     # pairs_group option checking
+    # args.set_pairs example: 1:foo 2:bar:baz 3::foobar,foobaz =>
+    # KEY = 1, VALUE = foo, TAGs = ['None']
+    # KEY = 2, VALUE = bar, TAGs = ['baz']
+    # KEY = 3, VALUE = None yet (private), TAGs = ['foobar', 'foobaz']
     if (to_set):
         kv = [i.split(":") for i in args.set_pairs]
 
@@ -634,10 +648,11 @@ def main():
                 (len(i[2]) != 0)):
                 tags = i[2].split(",")
 
-            # NOTE: If no value is given, prompt the user until it is.
+            # If no value is given, prompt the user until it is.
             while ((len(i) < 2) or (len(i[1]) == 0)):
                 # Private pair by default.
                 prompt = i[0] + ":"
+                
                 if (not(is_multiline)):
                     is_private = (privacy_status != PairStatus.public)
 
@@ -648,13 +663,12 @@ def main():
                 else:
                     all_lines = []
                     line = input(prompt)
-                    
+                    indentation = " " * (len(i[0]) + 1)
                     while line:
                         all_lines.append(line)
-                        line = input(" " * (len(i[0]) + 1))
+                        line = input(identation)
 
-                    # NOTE: Indentation is added, it may be removed later on...
-                    i = [i[0], ("\n" + " " * (len(i[0]) + 1)).join(all_lines)]
+                    i = [i[0], ("\n" + indentation).join(all_lines)]
 
             if (len(i) > 3):
                 eprint("malformed KEY:VALUE[:TAG] pair '%s'." % ":".join(i))
@@ -665,19 +679,27 @@ def main():
 
         args.set_pairs = new_pairs
 
+    # args.remove_tags example: foo,bar:1,2 => remove TAGs foo and bar
+    # from pairs with KEY 1 and 2.
     if (to_remove_tag):
         remove_tags = separate_two_groups(args.remove_tags, ":", ",", ",")
 
+    # args.get_tag example: foo bar,baz => get pairs if they have
+    # either foo OR foo AND bar as TAGs.
     if (to_get_tag):
         # NOTE: Tags separated by commas (',') are anded.
         #       If they are separated by spaces, they are ored.
         args.get_tags = separate_group(args.get_tags, ",")
 
+    # args.set_tag example: foo:1 bar,baz:2 foobar:3,4
+    # pair with KEY 1, set TAGs to ['foo']
+    # pair with KEY 2, set TAGs to ['bar', 'baz']
+    # pairs with KEY 3 and KEY 4, set TAGs to ['foobar']
     if (to_set_tag):
-        tk = [i.split(":") for i in args.set_tags]
+        tags_keys = [i.split(":") for i in args.set_tags]
 
         new_tags = []
-        for i in tk:
+        for i in tags_keys:
             if (len(i) > 2):
                 eprint("malformed TAG:KEY pair '%s'." % ":".join(i))
             elif (i[0] == ""):
@@ -689,6 +711,10 @@ def main():
                 
         args.set_tags = new_tags
 
+    # args.add_tag example: foo:1 bar,baz:2 foobar:3,4
+    # pair with KEY 1, add TAG ['foo']
+    # pair with KEY 2, add TAG['bar', 'baz']
+    # pairs with KEY 3 and KEY 4, add TAGs ['foobar']
     if (to_add_tag):
         args.add_tags = separate_two_groups(args.add_tags, ":", ",", ",")
     
@@ -728,12 +754,12 @@ def main():
                     if (to_get):
                         for key in copy_list(get_pairs):
                             if (pair.key_equals(key)):
-                                print("%s:%s" % (key, pair.get_value()))
+                                print("%s:%s (Tags: %s)" % (key, pair.get_value(), pair.get_tags()))
                                 get_pairs.remove(key)
 
                     if (to_get_tag):
                         if (any([set(pair.enc_tag_list).issuperset([encrypt_pair_element(pair.encryption_function, tag) for tag in and_tags]) for and_tags in args.get_tags])):
-                            print("%s:%s" % (pair.get_key(), pair.get_value()))
+                            print("%s:%s (Tags: %s)" % (pair.get_key(), pair.get_value(), pair.get_tags()))
                                 
                     if (to_remove_tag):
                         for tag_pair in remove_tags[:]:

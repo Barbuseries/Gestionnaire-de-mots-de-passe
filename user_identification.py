@@ -21,9 +21,6 @@ from Crypto.Hash import HMAC, SHA256
 import Crypto.Util.number as CUN
 from ast import literal_eval as make_tuple
 
-# DONE (but still needing thoughts):
-#       - Everything relies on the integrity of ~/.yapm/.user_cookie
-
 # NOTE: Login process:
 #       - Adding user:
 #           - Login prompt
@@ -47,15 +44,14 @@ from ast import literal_eval as make_tuple
 #         and a public key (generated on creation from private key, stored with other user information, encrypted)
 #       - When a user tries to connect:
 #         - Check valid connexion
-#         - Store plain public key in an hidden (for what it's worth...) file
-#         - Use private key (currently public key is used) to try to decrypt every file
+#         - Store plain public key in a file
+#         - Use private key to try to decrypt every file checks
 #         - If it works and there are not dummy files
 #         - Create file in current directory (filename is the category)
 #           => allow putting all files in a directory and using the
 #           program anywhere on the system.
 #         - ...
-#         - (TODO) When user is done, use public key to rencrypt each file
-#         - Add leading dot.
+#         - Profit!
 # Advantages:
 #  - Can make dummy files
 #  - Can encrypt filenames
@@ -63,7 +59,7 @@ from ast import literal_eval as make_tuple
 # Drawbacks:
 #  - Anybody can create a valid file when user is logged in.
 #    (Spam weak)
-#  TODO: - Use a database encrypted with 'private key' as symetric key to store user's files
+#  TODO: - Make file creation of file check be dependent on private key or user password.
 #        - Need to ask user's password every time a file needs to be created
 
 YAPM_USER_NAME = "yapm"
@@ -227,7 +223,6 @@ def user_already_registered(login):
     
     return False, None
 
-# TODO?: Allow empty logins/passwords.
 def prompt_user(login = None):
     if (login is None):
         login = input("Login: ")
@@ -306,7 +301,6 @@ def get_file_dummy_check(filename, directory = "."):
         
         with open(file_path, "r") as enc_file:
             check = enc_file.readline()[:-1].split("User check = ")[1]
-            print(check)
         return check
     except:
         return None
@@ -458,7 +452,7 @@ def get_string_after(byte_content, start, end = b"\n"):
         
     return result, found
 
-# Return info on current user if its connexcion is still valid (hasn't
+# Return info on current user if its connexion is still valid (hasn't
 # run out of time, and its cookie hasn't been tampered with).
 # Return Nones otherwhise.
 def get_info_current_user():
@@ -668,7 +662,6 @@ def revive_current_user_if_needed(time_limit = 0):
 def disconnect_user(has_background_check, directory, public_key):
     if (not(public_key is None)):
         # XXX: Not used anymore (for now anyway...).
-        # # TODO: Notify user and ask him to indicate the directory?
         # if (directory is None):
         #     directory = os.getcwd()
             
