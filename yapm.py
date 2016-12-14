@@ -3,6 +3,13 @@
 # PYTHON_ARGCOMPLETE_OK
 
 import argcomplete
+
+remote_usable = True
+try:
+    import mysql.connector
+except ImportError:
+    remote_usable = False
+    
 from user_identification import *
 from enum import Enum
 from collections import OrderedDict
@@ -105,7 +112,7 @@ def category_sign(category_key, content_list):
 def create_category(name, public_key, password, add_to_completion = True):
     if (not(get_file_from_category(name, public_key) is None)):
         return False, CategoryStatus.exist
-    
+
     final_name = int_to_cust(int(public_encrypt(public_key, name), 16))
     file_path = os.path.join(YAPM_FILE_DB, "." + final_name)
     
@@ -116,7 +123,7 @@ def create_category(name, public_key, password, add_to_completion = True):
             # TODO: Change check to just be name? (+ seed)
             enc_check = public_encrypt(public_key, generate_dummy_check(name))
             
-            category_key = generate_rsa(name, password)
+            category_key = generate_rsa(name, password, 2048)
 
             salt = os.urandom(16).hex().encode()
             pwd_keyhash = password_hash(password, salt)
@@ -139,7 +146,7 @@ def create_category(name, public_key, password, add_to_completion = True):
 
         return True, CategoryStatus.exist
     except Exception as e:
-        if (os.path.exits(file_path)):
+        if (os.path.exists(file_path)):
             os.remove(file_path)
             
         return False, CategoryStatus.inaccessible
@@ -207,6 +214,8 @@ def open_category(name, public_key, flags):
                     return True, encrypted_file, unpad(dec.decrypt(enc_content), isBytes = True).split(b"\n"), pwd_key, category_key
             else:
                 eprint("category '%s' was modified outside this program!" % name)
+                
+                return False, None, None, None, None
     except Exception as e:
         pass
 
@@ -353,6 +362,13 @@ def get_pair_from_key(all_pairs, key):
 
     return None
 
+# TODO: Implement this.
+def pull_categories(public_key, categories):
+    print("Not yet implemented.")
+    
+# TODO: Implement this.
+def push_categories(public_key, categories):
+    print("Not yet implemented.")
 
 def CategoryCompleter(prefix, **kwargs):
     return (c for c in os.listdir(YAPM_USER_CATEGORIES_DIRECTORY))
@@ -367,6 +383,8 @@ Each CATEGORY needs a password to be accessed.\n\
 A pair can have an unlimited amount of TAGs.\n\n\
 Accessing a CATEGORY is a simple as:\n yapm CATEGORY\n\n\
 If no user is logged in, you will be prompted to do so."
+
+    time_limit = 300
         
     parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter,
                                      description=description)
@@ -377,7 +395,7 @@ If no user is logged in, you will be prompted to do so."
     user_id_group.add_argument("-u", "--user", metavar="USER", dest="user", type=str, nargs=1,
                                help="Connect as user and exit.")
     user_id_group.add_argument("-t", "--time", metavar="TIME", dest="time", type=int, nargs=1,
-                               help="Connect, indicate to stay logged in for TIME seconds and exit.\n(TIME >= 0, default 0 (no limit))")
+                               help="Connect, indicate to stay logged in for TIME seconds and exit.\n(TIME >= 0, 0 meaning no limit)\n(Default " + str(time_limit) + ")")
     user_id_group.add_argument("--dump-user-info", dest="dump_user_info", action="store_const",
                                const=True,
                                help='Display all user-related information and exit.')
@@ -433,10 +451,22 @@ If no user is logged in, you will be prompted to do so."
     tags_group.add_argument('-a', '--add-tag', dest='add_tags', metavar='TAG:KEY', type=str, nargs='+',
                             help='Add TAG to the KEY-VALUE pair CATEGORY.')
 
+    remote_group = parser.add_argument_group("Remote", "Options related to remote usage.")
+    remote_exclusive = remote_group.add_mutually_exclusive_group()
+    remote_exclusive.add_argument('--pull', dest="to_pull",
+                                  action="store_const", const=True,
+                                  help="Pull CATEGORIES from remote.")
+    remote_exclusive.add_argument('--push', dest="to_push",
+                                  action="store_const", const=True,
+                                  help="Push CATEGORIES to remote.")
+    
     argcomplete.autocomplete(parser, always_complete_options="long")
     
     args = parser.parse_args()
 
+    to_pull = False
+    to_push = False
+    
     to_create = False
     to_delete = False
     
@@ -458,6 +488,12 @@ If no user is logged in, you will be prompted to do so."
 
     privacy_pairs = []
     privacy_status = PairStatus.same_as_before
+
+    if (is_arg_set(args.to_pull)):
+        to_pull = True
+
+    if (is_arg_set(args.to_push)):
+        to_push = True
 
     if (is_arg_set(args.to_create)):
         to_create = True
@@ -520,7 +556,7 @@ If no user is logged in, you will be prompted to do so."
     args.remove_tags = remove_duplicates(args.remove_tags)
 
     # Default
-    if (not(any([to_create, to_delete, to_set, to_get, to_remove, is_multiline, to_set_privacy,
+    if (not(any([to_pull, to_push, to_create, to_delete, to_set, to_get, to_remove, is_multiline, to_set_privacy,
                  to_get_tag, to_remove_tag, to_set_tag, to_add_tag]))):
         to_show = (len(args.categories) > 0)
 
@@ -534,8 +570,6 @@ If no user is logged in, you will be prompted to do so."
         
         prompt_create_new_user(new_user)
         sys.exit(0)
-
-    time_limit = 0
 
     if (is_arg_set(args.time)):
         if (check_platform(["posix"], "ignored: -t|--time: only supported on linux.")):
@@ -563,6 +597,30 @@ If no user is logged in, you will be prompted to do so."
 
     if (args.list_categories):
         dump_user_categories()
+        sys.exit(0)
+
+    if (to_pull or to_push):
+        if (not(remote_usable)):
+            eprint("mysql needs to be installed to connect to a remote database.")
+            sys.exit(0)
+
+        try:
+            conn = mysql.connector.connect(host="localhost")
+        except Exception:
+            eprint("could not connect to remote database.")
+            sys.exit(0)
+            
+        cursor = conn.cursor()
+
+        categories = args.categories or get_user_categories(public_key,
+                                                            YAPM_USER_CATEGORIES_DIRECTORY)
+
+        if (to_pull):
+            pull_categories(public_key, categories)
+        else:
+            push_categories(public_key, categories)
+
+        conn.close()
         sys.exit(0)
 
     # NOTE: -p|--private-pair or -P|--public-pair can be used with -s|--set-pair.

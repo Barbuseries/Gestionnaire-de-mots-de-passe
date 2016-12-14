@@ -77,7 +77,7 @@ YAPM_USER_CATEGORIES_DIRECTORY = os.path.join(YAPM_DIRECTORY, ".categories")
 #       - Connexion date encrypted by the user's private key.
 #       - Deconnexion date encrypted by the user's private key. (same
 #         as above if there is no time limit)
-#       - Current directory on connexion encrypted by the user's private key.
+#       - Current directory on connexion encrypted by the user's private key. TODO: Do not store this information anymore.
 #       - User's public key.
 YAPM_CURRENT_USER_COOKIE = os.path.join(YAPM_DIRECTORY, ".user_cookie")
 
@@ -89,7 +89,7 @@ GET_PID_BACKGROUND_SESSION_CHECK_CMD = "ps aux | grep -E -e 'sleep .* user_ident
 
 # FIXME: Temporary solution to have short enough filenames.
 #        See int_to_cust and cust_to_int.
-#        Current version returns a 169 chars string (max is 255).
+#        Current version returns a 171  (for a 2048 RSA key) chars string (max is 255).
 #        Just need a baseXX encoder.
 #        Other solution would be to use a hash. Dummy check would then be:
 #          - Read first line and extract filename.
@@ -97,7 +97,7 @@ GET_PID_BACKGROUND_SESSION_CHECK_CMD = "ps aux | grep -E -e 'sleep .* user_ident
 #          - Test equality.
 #        Likewhise, finding file by category would be encrypt->hash =>
 #        check exists + check is dummy.
-FILENAME_VALID_CHARS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-[].'
+FILENAME_VALID_CHARS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.'
 COUNT_FILENAME_VALID_CHARS = len(FILENAME_VALID_CHARS)
 
 # NOTE: Time to wait after user enters wrong login/password.
@@ -288,11 +288,11 @@ def prompt_create_new_user(login = None):
     
     return True
 
-def generate_rsa(login, password):
+def generate_rsa(login, password, key_length = 2048):
     pwd_hash = SHA256.new(password.encode("utf-8")).digest()
     rng = PRNG(login.encode("utf-8") + pwd_hash)
 
-    return RSA.generate(1024, rng)
+    return RSA.generate(key_length, rng)
 
 
 def get_file_dummy_check(filename, directory = "."):
@@ -393,7 +393,7 @@ def connect_as_user(login = None, time_limit = 0):
     valid_user, login, password = prompt_user(login)
     
     if (valid_user):
-        key = generate_rsa(login, password)
+        key = generate_rsa(login, password, 1024)
         display_non_dummy_files(key)
 
         cookie = get_yapm_file(YAPM_CURRENT_USER_COOKIE, "wb+")
@@ -557,7 +557,7 @@ def dump_user_info():
 
     print("Login: " + login)
     print("")
-    print("Connected at: " + datetime.datetime.fromtimestamp(start_date).strftime('%H:%M:%S %Y-%m-%d'))
+    print("Connected at:    " + datetime.datetime.fromtimestamp(start_date).strftime('%H:%M:%S %Y-%m-%d'))
     
     if (end_date != -1):
         print("Connected until: " + datetime.datetime.fromtimestamp(end_date).strftime('%H:%M:%S %Y-%m-%d'))
