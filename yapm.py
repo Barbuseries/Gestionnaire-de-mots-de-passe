@@ -2,6 +2,69 @@
 # -*- coding: utf-8 -*-
 # PYTHON_ARGCOMPLETE_OK
 
+"""
+How login works:
+    - Adding user:
+        - Login and password prompts
+        - If login in user database,
+            - error
+        - Otherwhise, add login:$salt$hash_key_derived_password
+    - Connecting as user
+        - Login and password prompts
+        - If not login in database
+            - error
+        - Get salt and key_derived_password associated with login
+        - If hash given password derived key + salt != hash_key_derived_password + salt
+            - error
+        - User is connected.
+
+What happens once connected:
+    - Create a user cookie
+      - Stores useful informations related to the user or this
+        specific connection (timestamp, user's public key, ...)
+      - Search through all categories to find ones owned by user (in YAPM_FILE_DB)
+      - Decypher their name and create eponymous files in YAPM_USER_CATEGORIES_DIRECTORY
+      - ...
+      - Profit!
+
+What happens when creating a category:
+    - If category exists
+      - error
+    - Password prompt
+    - Generate name for associated file (from user's public key, to
+      decypher it when user connects. Should be replaced by something
+      that does not allow anybody to create a category (requires
+      typing the user"s password))
+    - Create associated file
+    - Save hash_key_derived_password + salt
+    - Save user check (is file dummy or not)
+    - Save file's signature (modified along with the file, signs
+      everything above as well as the content itself)
+
+What happens when accessing a category:
+    - If category does not exist
+      - error
+    - Get associated file
+    - Password prompt
+    - Get salt and key_derived_password from file
+    - If hash given password derived key + salt != hash_key_derived_password + salt
+      - error
+    - Check signature file
+    - If signatures not verified
+      - error
+    - Do what must be done
+    - Sign the file if it was modified.
+
+Advantages:
+    - Category names inaccessible (when not logged in)
+    - Autocompletion (when logged in)
+    - Can make dummy files
+    - Can encrypt filenames.
+
+Drawbacks:
+    - Anybody can create a valid file when user is logged in.
+"""
+
 import argcomplete
 
 remote_usable = True
@@ -20,17 +83,41 @@ class CategoryStatus(Enum):
     inaccessible = 2
 
 class PairStatus(Enum):
+    """
+    The value of public pairs are displayed even when the pair is not
+    explicitely asked for (when displaying all category content).
+    The value of private pairs is only displayed when the pair is
+    explicitely asked for (displays '****' otherwhise).
+    """
     same_as_before = -1
     public = 0
     private = 1
 
 class Pair:
+    """
+    A pair is constituted of:
+    - a KEY: identifies uniquely a pair in a category
+    - a VALUE: information which the user wants protected
+    - TAG(s): meta information for an easier access (can be used to
+      retrieve a pair)
+
+    A pair is self encrypting (and every pair has its own encryption
+    function).
+
+    A pair can be public or private (see PairStatus).
+    Default privacy status is private.
+    """
     def __init__(self, pwd_key, salt):
+        """
+        Parameters:
+        pwd_key: Bytes (password key derived from the category's password)
+        salt: Bytes
+        """
         self.enc_key = None
         self.enc_value = None
         
-        self.enc_tag_list = []
-        self.privacy_status = PairStatus
+        self.enc_tag_list = [] # List of strings
+        self.privacy_status = PairStatus.private
         
         self.salt = salt
 
@@ -51,6 +138,10 @@ class Pair:
         self.enc_tag_list = [encrypt_pair_element(self.encryption_function, t) for t in tags]
 
     def add_tags(self, tags):
+        """
+        Add all non present tags to the list of tags and return the
+        number of added tags.
+        """
         count = 0
         
         for t in tags:
@@ -65,6 +156,9 @@ class Pair:
         return decrypt_pair_element(self.encryption_function, self.enc_value)
 
     def get_tags(self):
+        """
+        Return a(n alphabetically sorted) list of tags (strings). 
+        """
         return sorted([decrypt_pair_element(self.encryption_function, t) for t in self.enc_tag_list])
 
     def key_equals(self, key):
@@ -86,6 +180,10 @@ class Pair:
         self.privacy_status = PairStatus.public
 
     def encrypt(self):
+        """
+        Return representation of the pair in base 64 in bytes.
+        Each field is separated by a '$' (pair_status$key$value$tags).
+        """
         if (self.is_private()):
             integrity_check = b"Valid"
         else:
@@ -264,6 +362,10 @@ def unpad(m, r = True, isBytes = False):
     return m[(start_pad + 1):]
 
 def get_line_enc_content(enc_line, pwd_key):
+    """
+    Decrypt the pair represented by enc_line (which must have been
+    created by the 'encrypt' method of the pair).
+    """
     try:
         enc_line = unpad(base64.b64decode(enc_line, altchars=b'-_'), isBytes = True)
                 
@@ -377,6 +479,12 @@ def main():
     if (not(check_platform(["posix", "nt"]))):
         sys.exit(1)
 
+    if (not(os.path.exists(YAPM_DIRECTORY))):
+        os.makedirs(YAPM_DIRECTORY)
+
+    if (not(os.path.exists(YAPM_FILE_DB))):
+        os.makedirs(YAPM_FILE_DB)
+
     description="Personal data manager.\n\
 Stores KEY-VALUE pairs in CATEGORIES owned by USERs.\n\
 Each CATEGORY needs a password to be accessed.\n\
@@ -384,7 +492,7 @@ A pair can have an unlimited amount of TAGs.\n\n\
 Accessing a CATEGORY is a simple as:\n yapm CATEGORY\n\n\
 If no user is logged in, you will be prompted to do so."
 
-    time_limit = 300
+    time_limit = 180
         
     parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter,
                                      description=description)
@@ -451,14 +559,14 @@ If no user is logged in, you will be prompted to do so."
     tags_group.add_argument('-a', '--add-tag', dest='add_tags', metavar='TAG:KEY', type=str, nargs='+',
                             help='Add TAG to the KEY-VALUE pair CATEGORY.')
 
-    remote_group = parser.add_argument_group("Remote", "Options related to remote usage.")
-    remote_exclusive = remote_group.add_mutually_exclusive_group()
-    remote_exclusive.add_argument('--pull', dest="to_pull",
-                                  action="store_const", const=True,
-                                  help="Pull CATEGORIES from remote.")
-    remote_exclusive.add_argument('--push', dest="to_push",
-                                  action="store_const", const=True,
-                                  help="Push CATEGORIES to remote.")
+    # remote_group = parser.add_argument_group("Remote", "Options related to remote usage.")
+    # remote_exclusive = remote_group.add_mutually_exclusive_group()
+    # remote_exclusive.add_argument('--pull', dest="to_pull",
+    #                               action="store_const", const=True,
+    #                               help="Pull CATEGORIES from remote.")
+    # remote_exclusive.add_argument('--push', dest="to_push",
+    #                               action="store_const", const=True,
+    #                               help="Push CATEGORIES to remote.")
     
     argcomplete.autocomplete(parser, always_complete_options="long")
     
@@ -489,11 +597,11 @@ If no user is logged in, you will be prompted to do so."
     privacy_pairs = []
     privacy_status = PairStatus.same_as_before
 
-    if (is_arg_set(args.to_pull)):
-        to_pull = True
+    # if (is_arg_set(args.to_pull)):
+    #     to_pull = True
 
-    if (is_arg_set(args.to_push)):
-        to_push = True
+    # if (is_arg_set(args.to_push)):
+    #     to_push = True
 
     if (is_arg_set(args.to_create)):
         to_create = True
@@ -599,29 +707,29 @@ If no user is logged in, you will be prompted to do so."
         dump_user_categories()
         sys.exit(0)
 
-    if (to_pull or to_push):
-        if (not(remote_usable)):
-            eprint("mysql needs to be installed to connect to a remote database.")
-            sys.exit(0)
+    # if (to_pull or to_push):
+    #     if (not(remote_usable)):
+    #         eprint("mysql needs to be installed to connect to a remote database.")
+    #         sys.exit(0)
 
-        try:
-            conn = mysql.connector.connect(host="localhost")
-        except Exception:
-            eprint("could not connect to remote database.")
-            sys.exit(0)
+    #     try:
+    #         conn = mysql.connector.connect(host="localhost")
+    #     except Exception:
+    #         eprint("could not connect to remote database.")
+    #         sys.exit(0)
             
-        cursor = conn.cursor()
+    #     cursor = conn.cursor()
 
-        categories = args.categories or get_user_categories(public_key,
-                                                            YAPM_USER_CATEGORIES_DIRECTORY)
+    #     categories = args.categories or get_user_categories(public_key,
+    #                                                         YAPM_USER_CATEGORIES_DIRECTORY)
 
-        if (to_pull):
-            pull_categories(public_key, categories)
-        else:
-            push_categories(public_key, categories)
+    #     if (to_pull):
+    #         pull_categories(public_key, categories)
+    #     else:
+    #         push_categories(public_key, categories)
 
-        conn.close()
-        sys.exit(0)
+    #     conn.close()
+    #     sys.exit(0)
 
     # NOTE: -p|--private-pair or -P|--public-pair can be used with -s|--set-pair.
     #       In that case, if keys were passed on to
@@ -788,7 +896,6 @@ If no user is logged in, you will be prompted to do so."
         for category in args.categories:
             is_category_modified = False
             all_enc_pairs = []
-            # all_old_lines = []
 
             # NOTE: As check was moved above, it should always
             # succeed. Better be sure anyway...
@@ -816,6 +923,7 @@ If no user is logged in, you will be prompted to do so."
                                 get_pairs.remove(key)
 
                     if (to_get_tag):
+                        # It's beautifully horrendous.
                         if (any([set(pair.enc_tag_list).issuperset([encrypt_pair_element(pair.encryption_function, tag) for tag in and_tags]) for and_tags in args.get_tags])):
                             print("%s:%s (Tags: %s)" % (pair.get_key(), pair.get_value(), pair.get_tags()))
                                 
@@ -853,11 +961,6 @@ If no user is logged in, you will be prompted to do so."
                                 
                     all_enc_pairs.append(pair)
 
-                # TODO: Just use different integrity check.
-                # # NOTE: Allow fake pairs.
-                # else:
-                #     all_old_lines.append(enc_line)
-
             if (to_get):
                 for key in get_pairs:
                     eprint("--get-pair: invalid key '%s'." % key)
@@ -876,7 +979,7 @@ If no user is logged in, you will be prompted to do so."
             #     for tag in remove_tags:
             #         eprint("--remove-tag: invalid tag '%s'." % tag)
 
-            # NOTE: Add new pairs and replace VALUEs of old ones.
+            # Add new pairs and replace VALUEs of old ones.
             if (to_set):
                 for i in args.set_pairs:
                     pair = get_pair_from_key(all_enc_pairs, i[0])
@@ -955,9 +1058,6 @@ If no user is logged in, you will be prompted to do so."
                 # Old signature.
                 encrypted_file.readline()
                 
-                # for l in all_old_lines:
-                #     encrypted_file.write(l)
-
                 salt = os.urandom(AES.block_size)
                 enc = AES.new(pwd_key, AES.MODE_CBC, IV=salt)
 
@@ -1002,5 +1102,5 @@ if __name__ == "__main__":
         main()
     except (KeyboardInterrupt, EOFError):
         print("")
-    # except Exception as e:
-    #     print("\nAn exception has occurred, sorry.")
+    except Exception as e:
+        print("\nAn exception has occurred: %s" % e)

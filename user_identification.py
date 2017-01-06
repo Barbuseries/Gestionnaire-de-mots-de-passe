@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
+# NOTE: Here is everything regarding user identification.
+
 import os
 import sys
 import shutil
@@ -20,47 +22,6 @@ from Crypto.PublicKey import RSA
 from Crypto.Hash import HMAC, SHA256
 import Crypto.Util.number as CUN
 from ast import literal_eval as make_tuple
-
-# NOTE: Login process:
-#       - Adding user:
-#           - Login prompt
-#           - Password prompt
-#           - If login in user database,
-#               - error
-#           - Otherwhise, add login:$salt$key_derived_password
-#       - Connecting as user
-#           - Login prompt
-#           - Password prompt
-#           - If not login in database
-#               - error
-#           - Get salt and key_derived_password
-#           - If given password derived key + salt != key_derived_password + salt
-#               - error
-#           - Show user categories
-
-# NOTE: How this is going to work:
-#       - Each file is hidden (has a leading dot)
-#       - Each user has a private key (derived from login and password)
-#         and a public key (generated on creation from private key, stored with other user information, encrypted)
-#       - When a user tries to connect:
-#         - Check valid connexion
-#         - Store plain public key in a file
-#         - Use private key to try to decrypt every file checks
-#         - If it works and there are not dummy files
-#         - Create file in current directory (filename is the category)
-#           => allow putting all files in a directory and using the
-#           program anywhere on the system.
-#         - ...
-#         - Profit!
-# Advantages:
-#  - Can make dummy files
-#  - Can encrypt filenames
-#
-# Drawbacks:
-#  - Anybody can create a valid file when user is logged in.
-#    (Spam weak)
-#  TODO: - Make file creation of file check be dependent on private key or user password.
-#        - Need to ask user's password every time a file needs to be created
 
 YAPM_USER_NAME = "yapm"
 YAPM_DUMMY_CHECK = "__dummy:"
@@ -84,7 +45,6 @@ YAPM_CURRENT_USER_COOKIE = os.path.join(YAPM_DIRECTORY, ".user_cookie")
 # TODO: It may be more secure to store the pid at the process
 # creation, in case someone has the idea to kill it and recreate one
 # with a sleep of 10000000...
-#       In that case, it may be better not to try to recreate it.
 GET_PID_BACKGROUND_SESSION_CHECK_CMD = "ps aux | grep -E -e 'sleep .* user_identification.py -k' | grep -v 'grep' | awk '{print $2}'"
 
 # FIXME: Temporary solution to have short enough filenames.
@@ -100,16 +60,33 @@ GET_PID_BACKGROUND_SESSION_CHECK_CMD = "ps aux | grep -E -e 'sleep .* user_ident
 FILENAME_VALID_CHARS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.'
 COUNT_FILENAME_VALID_CHARS = len(FILENAME_VALID_CHARS)
 
-# NOTE: Time to wait after user enters wrong login/password.
+# Time to wait after user enters wrong login/password.
 ACCESS_DENIED_WAIT_DELAY = 1.5;
 
 def eprint(*args, **kwargs):
+    """
+    Error print.
+
+    Send output to stderr. If prog_name is set to True, prefix output
+    by the program's name.
+    """
     if (kwargs.pop("prog_name", True)):
         print("%s: %s" % (os.path.basename(sys.argv[0]), *args), file=sys.stderr, **kwargs)
     else:
         print(*args, file=sys.stderr, **kwargs)
     
 def check_platform(plats, message = "This platform is currently not supported!"):
+    """
+    Return True if the current platform is in plats, False otherwhise
+    and display an error message.
+    
+    See os.name for the different platforms.
+
+    Parameters:
+    plats -- List of strings (one for each platform)
+    message -- String
+    """
+    
     if (os.name not in plats):
         if (not(message is None)):
             eprint(message)
@@ -118,6 +95,13 @@ def check_platform(plats, message = "This platform is currently not supported!")
     return True
 
 def confirm_password(test_pwd, input_text = "Confirm password:"):
+    """
+    Prompt for a password and return if it's equal to test_pwd.
+    
+    Parameters:
+    test_pwd -- String (password to test against)
+    input_text -- String
+    """
     confirm_pwd = getpass.getpass(input_text)
     
     if (confirm_pwd != test_pwd):
@@ -136,6 +120,9 @@ def enter_password_and_confirm(input_text = "Password:", confirm_input_text = "C
 
 # FIXME: Replace this!
 def int_to_cust(i):
+    """
+    Convert an int to a string in base<COUNT_FILENAME_VALID_CHARS>.
+    """
     result = ''
     while i:
         result = FILENAME_VALID_CHARS[i % COUNT_FILENAME_VALID_CHARS] + result
@@ -145,6 +132,9 @@ def int_to_cust(i):
     return result
 
 def cust_to_int(s):
+    """
+    Convert a string in base<COUNT_FILENAME_VALID_CHARS> to an int.
+    """
     result = 0
     for char in s:
         result = result * COUNT_FILENAME_VALID_CHARS + FILENAME_VALID_CHARS.find(char)
@@ -154,10 +144,22 @@ def get_pid_background_session_check():
     return subprocess.check_output(GET_PID_BACKGROUND_SESSION_CHECK_CMD, shell=True)[:-1].decode()
 
 def touch_open(filename, *args, **kwargs):
+    """
+    Create filename if it does not already exist, then open the file.
+    """
     open(filename, "a").close()
     return open(filename, *args, **kwargs)
 
 def get_yapm_file(filename, flags = "r", create_parent_dir = True):
+    """
+    Create yapm's directory then open the file.
+    This should be used every time a file related to yapm must be
+    opened.
+
+    Parameters:
+    filename -- String
+    flags -- String (Flags used to open the file: r/w/a/...)
+    """
     try:
         if (create_parent_dir and
             not(os.path.exists(YAPM_DIRECTORY))):
@@ -183,6 +185,13 @@ def clear_user_db():
         os.remove(YAPM_USER_DB)
 
 def password_key(password, salt = b'salt'):
+    """
+    Return a key derived password (as bytes).
+
+    Parameters:
+    password -- String
+    salt -- Bytes
+    """
     return bcrypt.kdf(password = password.encode(),
                       salt = salt,
                       desired_key_bytes = 32,
@@ -190,18 +199,41 @@ def password_key(password, salt = b'salt'):
 
 # TODO: Should both of them have the same salt?
 def password_hash(password, salt = b'salt'):
+    """
+    Return the hash of the (salted) password (as bytes).
+
+    Parameters:
+    password -- String
+    salt -- Bytes
+    """
     return hashlib.pbkdf2_hmac('sha256',
                                password_key(password, salt),
                                salt,
                                100000).hex()
 
 def password_keyhash(password_key, salt = b'salt'):
+    """
+    Return the hash of the (salted) key derived password (as bytes).
+
+    Parameters:
+    password_key -- Bytes
+    salt -- Bytes
+    """
     return hashlib.pbkdf2_hmac('sha256',
                                password_key,
                                salt,
                                100000).hex()
         
 def user_already_registered(login):
+    """
+    Check if login is already in the database.
+    If it is, return True and the corresponding line.
+
+    Otherwhise, return False and None.
+
+    Parameters:
+    login -- String
+    """
     database = get_user_db("rb+")
 
     if (database is None):
@@ -224,6 +256,16 @@ def user_already_registered(login):
     return False, None
 
 def prompt_user(login = None):
+    """
+    Login and password prompt, as well as identifiers verification.
+
+    Return True if the identifiers are valid, as well as the login and
+    the password.
+    Return False otherwhise.
+
+    Parameters:
+    login -- String
+    """
     if (login is None):
         login = input("Login: ")
     password = getpass.getpass()
@@ -241,6 +283,17 @@ def prompt_user(login = None):
     return False, login, None
 
 def prompt_new_user(login = None):
+    """
+    Login and password prompt for a new user, as well as identifiers
+    verification.
+
+    Return False if the user does not currently exists, as well as the
+    the login and the password.
+    Return True otherwhise.
+
+    Parameters:
+    login -- String
+    """
     if (login is None):
         login = input("Login: ")
 
@@ -260,6 +313,14 @@ def prompt_new_user(login = None):
     return False, login, password
 
 def prompt_create_new_user(login = None):
+    """
+    Same as prompt_new_user + database modification.
+
+    Return True on success, False otherwhise.
+
+    Parameters:
+    login -- String
+    """
     already_registered, login, password = prompt_new_user(login)
     
     if (already_registered):
@@ -267,7 +328,6 @@ def prompt_create_new_user(login = None):
         return False
     
     if ((login is None) or (password is None)):
-        print("Invalid indentifiers.")
         return False
 
     database = get_user_db("ab")
@@ -289,6 +349,14 @@ def prompt_create_new_user(login = None):
     return True
 
 def generate_rsa(login, password, key_length = 2048):
+    """
+    Generate an RSA key pair from the login and the password.
+
+    Parameters:
+    login -- String
+    password -- String
+    key_length -- Int
+    """
     pwd_hash = SHA256.new(password.encode("utf-8")).digest()
     rng = PRNG(login.encode("utf-8") + pwd_hash)
 
@@ -296,6 +364,17 @@ def generate_rsa(login, password, key_length = 2048):
 
 
 def get_file_dummy_check(filename, directory = "."):
+    """
+    Return the (encrypted) content of filename which describes it's
+    status (dummy or not).
+
+    Return None on error.
+
+    
+    Parameters:
+    filename -- String
+    directory -- String
+    """
     try:
         file_path = os.path.join(directory, filename)
         
@@ -309,9 +388,6 @@ def generate_dummy_check(filename, is_dummy = False):
     return filename + YAPM_DUMMY_CHECK + str(int(is_dummy))
     
 def check_dummy_check(name_test, ref, public_key):
-    # FIXME: Find a better check than filename + const. Could be
-    # easily found by an outsider, knowing the public_key
-    # (which is the point).
     enc_dummy_check = public_encrypt(public_key, generate_dummy_check(name_test))
 
     if (enc_dummy_check == ref):
@@ -331,6 +407,13 @@ def is_displayed_file_mine(possible_category, public_key):
     return check_dummy_check(possible_category, dummy_check, public_key)
 
 def get_category_from_file(filename, private_key):
+    """
+    Return the category name associated with filename.
+
+    Parameters:
+    filename -- String
+    private_key -- RSA private key
+    """
     category = filename
             
     if (category.startswith(".")):
@@ -341,13 +424,6 @@ def get_category_from_file(filename, private_key):
     if (dummy_check is None):
         return None
 
-    # NOTE: Should not be useful anymore as filename are encrypted
-    # anyway.
-    # # NOTE: First check if filename as is.
-    # if (check_dummy_check(category, dummy_check, private_key.publickey())):
-    #     return category
-
-    # NOTE: Check decrypted filename.
     # FIXME: See int_to_cust and cust_to_int.
     category = hex(cust_to_int(category))
     category = private_decrypt(private_key, category)
@@ -361,6 +437,13 @@ def get_category_from_file(filename, private_key):
     return None
 
 def get_file_from_category(name, public_key):
+    """
+    Return the filename associated with the category name.
+
+    Parameters:
+    name -- String, name of the category.
+    public_key -- RSA public key
+    """
     file_path = os.path.join(YAPM_FILE_DB, "." + name)
 
     # TODO: Check if file is dummy.
@@ -378,6 +461,13 @@ def get_file_from_category(name, public_key):
     return None
 
 def display_non_dummy_files(private_key):
+    """
+    Create a directory (YAPM_USER_CATEGORIES_DIRECTORY) which stores
+    all categories (empty files whose name is the category).
+
+    Parameters:
+    private_key -- RSA private key
+    """
     if not os.path.exists(YAPM_USER_CATEGORIES_DIRECTORY):
         os.makedirs(YAPM_USER_CATEGORIES_DIRECTORY)
     for root, dirs, files in os.walk(YAPM_FILE_DB):
@@ -387,9 +477,20 @@ def display_non_dummy_files(private_key):
             if (category != None):
                 file_path = os.path.join(root, f)
                 open(os.path.join(YAPM_USER_CATEGORIES_DIRECTORY, category), "w+").close()
-                # shutil.move(file_path, category)
 
 def connect_as_user(login = None, time_limit = 0):
+    """
+    Prompt for login and password and connect the user if database
+    verification succeeds.
+    Create a user cookie and get categories which the user owns.
+
+    If a time limit is specified, start a background process to
+    disconnect the user once it has been exceeded.
+
+    Parameters:
+    login -- String
+    time_limit -- int
+    """
     valid_user, login, password = prompt_user(login)
     
     if (valid_user):
@@ -439,8 +540,15 @@ def connect_as_user(login = None, time_limit = 0):
         
     return False
 
-# Return decode content after start and before end (both excluding).
 def get_string_after(byte_content, start, end = b"\n"):
+    """
+    Return decoded content after start and before end (both excluded).
+
+    Parameters:
+    byte_content -- Bytes
+    start -- Bytes
+    end -- Bytes
+    """
     found = False
     result = None
 
@@ -452,10 +560,13 @@ def get_string_after(byte_content, start, end = b"\n"):
         
     return result, found
 
-# Return info on current user if its connexion is still valid (hasn't
-# run out of time, and its cookie hasn't been tampered with).
-# Return Nones otherwhise.
 def get_info_current_user():
+    """
+    Return info on current user if its connexion is still valid (hasn't
+    run out of time, and its cookie hasn't been tampered with).
+
+    Return Nones otherwhise.
+    """
     try:
         with open(YAPM_CURRENT_USER_COOKIE, "rb") as cookie:
             signature_tag = b"Signature = "
@@ -532,8 +643,6 @@ def get_public_key_current_user():
 
     return key
 
-# TODO: Instead of multiple dump functions, just use one with multiple
-# flags. 
 def dump_user_categories(key = None, directory = None):
     if (key is None):
         login, start_date, end_date, directory, key = get_info_current_user()
@@ -542,7 +651,6 @@ def dump_user_categories(key = None, directory = None):
         print("No user is logged in.")
         return
 
-    # user_categories = get_user_categories(key, directory)
     user_categories = get_user_categories(key, YAPM_USER_CATEGORIES_DIRECTORY)
     
     for category in user_categories:
@@ -555,6 +663,7 @@ def dump_user_info():
         print("No user is logged in.")
         return
 
+    print("")
     print("Login: " + login)
     print("")
     print("Connected at:    " + datetime.datetime.fromtimestamp(start_date).strftime('%H:%M:%S %Y-%m-%d'))
@@ -564,8 +673,6 @@ def dump_user_info():
         print(str(math.floor(end_date - time.time())) + " seconds left")
 
     print("")
-    print("Directory: " + directory)
-    print("")
     print("Categories:")
     
     dump_user_categories(key, directory)
@@ -574,15 +681,33 @@ def dump_user_info():
     print("Public key:\n" + key.exportKey().decode())
     
     
-# NOTE: m must be a string.
-#       Return an hexadecimal string.
 def public_encrypt(public_key, m, encoding = "utf-8", byteorder = "little"):
+    """
+    Use the RSA public key to encrypt the message m (as an hexadecimal
+    string).
+
+    Parameters:
+    public key -- RSA public key
+    m -- String
+    encoding -- String
+    byteorder -- String
+    """
     return hex(public_key.encrypt(int.from_bytes(m.encode(encoding), byteorder=byteorder), 'x')[0])
 
-# NOTE: enc_m must be an hexadecimal string.
-#       Return a string.
-#       Return None if enc_m can not be decrypted.
 def private_decrypt(private_key, enc_m, enc_m_len = None, encoding = "utf-8", byteorder = "little"):
+    """
+    Use the RSA private key to decrypt the encrypted hexadecimal
+    string enc_m (as a string).
+    Return None if enc_m can not be decrypted.
+
+    Parameters:
+    private key -- RSA private key
+    enc_m -- Hexadecimal string
+    encoding -- String (same used to encrypt, refers to the decrypted
+                message itself)
+    byteorder -- String (same used to encrypt, refers to the decrypted
+                 message itself)
+    """
     try:
         enc_m = int(enc_m, 16)
 
@@ -593,44 +718,22 @@ def private_decrypt(private_key, enc_m, enc_m_len = None, encoding = "utf-8", by
     except:
         return None
 
-# NOTE: Replaced by signing and verifying.
-# # NOTE: m must be a string.
-# #       Return an hexadecimal string.
-# def private_encrypt(private_key, m, encoding = "utf-8", byteorder = "little"):
-#     return hex(private_key.decrypt(int.from_bytes(m.encode(encoding), byteorder=byteorder)))
-
-# # NOTE: enc_m must be an hexadecimal string.
-# #       Return a string.
-# #       Return None if enc_m can not be decrypted.
-# def public_decrypt(public_key, enc_m, enc_m_len = None, encoding = "utf-8", byteorder = "little"):
-#     try:
-#         enc_m = int(enc_m, 16)
-
-#         if (enc_m_len is None):
-#             enc_m_len = math.ceil(math.log(enc_m, 2) / 8)
-
-#         return public_key.encrypt(enc_m, 'x')[0].to_bytes(enc_m_len, byteorder=byteorder).decode(encoding).replace('\0', '')
-#     except:
-#         return None
-
-# NOTE: Hide categories belonging to the current user.
-# def hide_user_categories(public_key, directory):
-    # user_categories = get_user_categories(public_key, directory, True)
-    # shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY)
-    # for category in user_categories:
-    #     try:
-    #         # NOTE; Yes, this counts as hiding...
-    #         os.remove(category)
-    #     except:
-    #         eprint("Failed to hide category '%s'." % os.path.basename(category))
 def hide_user_categories():
     if (os.path.exists(YAPM_USER_CATEGORIES_DIRECTORY)):
         shutil.rmtree(YAPM_USER_CATEGORIES_DIRECTORY)
 
-# NOTE: Assumes each file in directory may be a category. Tries to get
-# a valid file for each one.
-# Return categories belonging to the current user.
 def get_user_categories(public_key, directory, full_path = False):
+    """
+    Check every file in YAPM_USER_CATEGORIES_DIRECTORY and return a
+    list of valid ones.
+    
+    Parameters:
+    public_key -- RSA public key
+    directory -- String (Not used anymore, as it's just
+                 YAPM_USER_CATEGORIES_DIRECTORY)
+    full_path -- Bool (Not useful anymore, as the directory is always
+                 the same)
+    """
     user_categories = []
 
     for root, dirs, files in os.walk(directory):
@@ -645,6 +748,16 @@ def get_user_categories(public_key, directory, full_path = False):
                     
 
 def revive_current_user_if_needed(time_limit = 0):
+    """
+    If no user is connected, ask user to connect.
+
+    Return the user's public key.
+    Stop the program otherwhise.
+    
+    Parameters:
+    time_limit -- Time in seconds after which the user is
+                  disconnected. (0 sets no limit)
+    """
     public_key = get_public_key_current_user()
     
     if (public_key is None):
@@ -660,12 +773,19 @@ def revive_current_user_if_needed(time_limit = 0):
     return public_key
 
 def disconnect_user(has_background_check, directory, public_key):
+    """
+    Remove user cookie and YAPM_USER_CATEGORIES_DIRECTORY.
+
+    If the user set a time limit, stop the background process as well
+    (if it's still running).
+
+    Parameters:
+    has_background_check -- Bool (True if user logged in with a time
+                            limit != 0)
+    Directory -- String (Not used anymore)
+    public_key -- RSA public key
+    """
     if (not(public_key is None)):
-        # XXX: Not used anymore (for now anyway...).
-        # if (directory is None):
-        #     directory = os.getcwd()
-            
-        # hide_user_categories(public_key, directory)
         hide_user_categories()
         os.remove(YAPM_CURRENT_USER_COOKIE)
 
@@ -678,13 +798,20 @@ def disconnect_user(has_background_check, directory, public_key):
                 pass
 
 def disconnect_current_user():
-    # public_key = revive_current_user_if_needed()
     login, start_date, end_date, directory, public_key = get_info_current_user()
     
     disconnect_user(not(end_date is None), directory, public_key)
         
 
 class PRNG(object):
+    """
+    Pseudo random number generator used for generating the RSA key
+    pair.
+
+    It's used because we need to be able to specify a seed (to get the
+    same result every time the same user logs in), and to output
+    bytes.
+    """
     def __init__(self, seed):
         self.index = 0
         self.seed = seed
