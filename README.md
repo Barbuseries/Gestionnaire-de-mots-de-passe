@@ -19,3 +19,7 @@ sudo pip3 install argcomplete
 sudo activate-global-python-argcomplete
 ```
 Restart your terminal.
+
+# Getting started
+
+See [Wiki](https://github.com/Barbuseries/Gestionnaire-de-mots-de-passe/wiki).
